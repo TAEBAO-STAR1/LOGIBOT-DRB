@@ -1,0 +1,40 @@
+# requirements.txt
+
+# UI
+streamlit
+
+# RAG Orchestration (핵심)
+langchain
+langchain-community
+langchain-core
+
+# Vector DB
+qdrant-client
+
+# LLM Interface (Ollama 연동)
+ollama
+
+# PDF 파일 로딩
+pypdf
+PyPDF2
+
+# 기타 의존성
+python-dotenv
+requests
+pydantic
+langchain==1.0.3
+langchain-community==0.4.1
+langchain-core==1.0.3
+langchain-ollama==1.0.0
+langchain-qdrant==1.1.0
+langchain-text-splitters==1.0.0
+
+# Excel 지원
+openpyxl
+msoffcrypto-tool
+pandas
+unstructured[xlsx]
+
+# 추가 unstructured 의존성
+python-magic-bin  # Windows용
+pillow
