@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # 📦 DRB LOGIBOT-AI
 
 > 물류팀을 위한 지능형 RAG 기반 AI 챗봇 시스템
