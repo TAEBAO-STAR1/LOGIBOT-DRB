@@ -37,3 +37,5 @@ Thumbs.db
 
 # streamlit 파일
 .streamlit/secrets.toml
+migrate_to_cloud.py
+qdrant_storage/
