@@ -1,2 +1,39 @@
-# 환경 설정 파일 제외
+
+# 환경변수 (API 키, 비밀번호 등 — 절대 올리면 안 됨)
 .env
+.env.local
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 가상환경
+venv/
+.venv/
+env/
+
+# Qdrant 로컬 데이터 (용량 큼)
+qdrant_storage/
+*.qdrant
+
+# 업로드 파일 (개인정보 포함 가능)
+data/source_docs/*.xlsx
+data/uploads/
+
+# 로그
+*.log
+logs/
+
+# OS 파일
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# streamlit 파일
+.streamlit/secrets.toml

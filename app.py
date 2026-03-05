@@ -1,378 +1,1254 @@
 import streamlit as st
-import json
-import time
 from datetime import datetime
 from dotenv import load_dotenv
-from rag_pipeline.query_processor import get_rag_response, submit_feedback
+import re
+import pandas as pd
+import plotly.express as px
+
+# 팀별 테마 색상 정의
+TEAM_CONFIG = {
+    "국내영업팀": {"color": "#007BFF", "hover": "#0056b3", "icon": "🚚"},
+    "해외영업팀": {"color": "#FF8C00", "hover": "#CC7000", "icon": "🚢"},
+    "트랙영업팀": {"color": "#28A745", "hover": "#1E7E34", "icon": "🚜"}
+}
+
+# 1. 초기 카테고리 설정
+if 'selected_team' not in st.session_state:
+    st.session_state.selected_team = "국내영업팀"
+
+# 2. 팀별 색상
+st.markdown(f"""
+<style>
+    .team-container {{ display: flex; justify-content: center; gap: 15px; margin-bottom: 30px; }}
+    .team-card {{
+        flex: 1; text-align: center; padding: 15px; border-radius: 12px;
+        color: white; font-weight: bold; cursor: pointer; transition: all 0.3s ease;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1); border: 2px solid transparent;
+    }}
+    /* 부서별 고유 색상 및 호버 적용 */
+    .btn-dom {{ background-color: {TEAM_CONFIG["국내영업팀"]["color"]}; }}
+    .btn-dom:hover {{ background-color: {TEAM_CONFIG["국내영업팀"]["hover"]}; transform: translateY(-3px); box-shadow: 0 6px 12px rgba(0,0,0,0.2); }}
+    
+    .btn-int {{ background-color: {TEAM_CONFIG["해외영업팀"]["color"]}; }}
+    .btn-int:hover {{ background-color: {TEAM_CONFIG["해외영업팀"]["hover"]}; transform: translateY(-3px); }}
+    
+    .btn-track {{ background-color: {TEAM_CONFIG["트랙영업팀"]["color"]}; }}
+    .btn-track:hover {{ background-color: {TEAM_CONFIG["트랙영업팀"]["hover"]}; transform: translateY(-3px); }}
+</style>
+""", unsafe_allow_html=True)
+
+# --- 부정 피드백 사유 팝업 ---
+@st.dialog("💬 답변이 불만족스러우셨나요?")
+def show_bad_feedback_popup(msg_idx: int, query: str, answer: str):
+    """부정 피드백 사유 입력 팝업"""
+    st.markdown("""
+    <div style="
+        background: linear-gradient(135deg, rgba(239,68,68,0.08), rgba(251,191,36,0.08));
+        border-left: 4px solid #ef4444;
+        border-radius: 8px;
+        padding: 14px 16px;
+        margin-bottom: 18px;
+        font-size: 14px;
+        line-height: 1.7;
+        color: #374151;
+    ">
+        여러분의 피드백은 <strong>AI 답변 품질 개선</strong>에 직접적으로 반영됩니다.<br>
+        어떤 점이 불만족스러우셨는지 알려주시면 더 정확한 답변을 제공할 수 있습니다. 🙏
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 사유 선택 (체크박스)
+    st.markdown("**불만족 이유를 선택해주세요** (복수 선택 가능)")
+    reasons = {
+        "wrong":    st.checkbox("❌ 답변 내용이 틀렸어요"),
+        "missing":  st.checkbox("🔍 필요한 정보가 빠졌어요"),
+        "unclear":  st.checkbox("😕 답변이 이해하기 어려워요"),
+        "unrelated":st.checkbox("🚫 질문과 관련 없는 답변이에요"),
+        "calc":     st.checkbox("🔢 계산이 잘못되었어요"),
+    }
+    REASON_LABELS = {
+        "wrong": "답변 내용 오류",
+        "missing": "정보 누락",
+        "unclear": "내용 불명확",
+        "unrelated": "질문 무관 답변",
+        "calc": "계산 오류",
+    }
+
+    # 추가 의견
+    extra = st.text_area(
+        "추가 의견 (선택 사항)",
+        placeholder="더 자세한 내용을 알려주시면 개선에 큰 도움이 됩니다.",
+        max_chars=300,
+        height=90
+    )
+
+    st.markdown("")
+    col_submit, col_cancel = st.columns([1, 1])
+
+    with col_submit:
+        if st.button("📤 피드백 제출", use_container_width=True, type="primary"):
+            selected = [REASON_LABELS[k] for k, v in reasons.items() if v]
+            reason_text = " / ".join(selected) if selected else "사유 미입력"
+            if extra.strip():
+                reason_text += f" | 추가의견: {extra.strip()}"
+
+            if (st.session_state.current_id, msg_idx) not in st.session_state.feedback_done:
+                submit_feedback(query, 0.0, answer, [], reason=reason_text)
+                st.session_state.feedback_done.add((st.session_state.current_id, msg_idx))
+
+            st.toast("피드백이 반영되었습니다. 감사합니다! 🙏")
+            st.rerun()
+
+    with col_cancel:
+        if st.button("취소", use_container_width=True):
+            st.rerun()
+@st.dialog("📄 참고 문서 미리보기")
+def show_source_popup(sources: list, query: str):
+    """참고 문서 팝업 - 키워드 하이라이트 포함"""
+    if not sources:
+        st.info("참고한 문서 정보가 없습니다.")
+        return
+
+    # 키워드 추출 (2글자 이상)
+    keywords = [k for k in query.split() if len(k) >= 2]
+
+    # 탭으로 문서 구분 (최대 3개)
+    tab_labels = [f"📄 {s['name'][:15]}.." if len(s['name']) > 15 else f"📄 {s['name']}" for s in sources]
+    tabs = st.tabs(tab_labels)
+
+    for tab, source in zip(tabs, sources):
+        with tab:
+            content = source.get("content", "내용을 불러올 수 없습니다.")
+
+            # 키워드 하이라이트 적용
+            highlighted = content
+            for kw in keywords:
+                highlighted = re.sub(
+                    f"({re.escape(kw)})",
+                    r'<mark style="background-color:#FFE066;color:#333;padding:1px 3px;border-radius:3px;">\1</mark>',
+                    highlighted,
+                    flags=re.IGNORECASE
+                )
+            # 줄바꿈 → <br>
+            highlighted = highlighted.replace("\n", "<br>")
+
+            st.markdown(
+                f"""
+                <div style="
+                    height: 420px; overflow-y: auto;
+                    border: 1px solid #e2e8f0; border-radius: 10px;
+                    padding: 16px 20px; background: #f8fafc;
+                    color: #334155; line-height: 1.9; font-size: 14px;
+                ">
+                    {highlighted}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            st.caption(f"🔍 하이라이트 키워드: {' · '.join(keywords) if keywords else '없음'}")
+
+# --- RAG 인터페이스 연결(모듈화) ---
+# try:
+#     from main import LogisticsAgent
+#     import logging
+#     logger = logging.getLogger(__name__)
+#     # 세션 상태에 에이전트 초기화 (싱글톤처럼 유지)
+#     if "agent" not in st.session_state:
+#         st.session_state.agent = LogisticsAgent()
+    
+#     # 기존 함수들과 호환되도록 래퍼(Wrapper) 함수 생성
+#     def get_rag_response(query, context=None):
+#         return st.session_state.agent.ask(query, context)
+
+#     def submit_feedback(query, score, answer="", sources=[]):
+#         st.session_state.agent.feedback(query, answer, score)
+
+# except ImportError as e:
+#     st.error(f"모듈을 불러오지 못했습니다: {e}")
+#     def get_rag_response(q, context=None): return {"answer": "시스템 오류", "sources": []}
+#     def submit_feedback(q, s, a, src): pass
+#     import logging
+#     logger = logging.getLogger(__name__)
+
+# RAG 인터페이스 연결
+try:
+    from rag_pipeline.query_processor import get_rag_response, submit_feedback, analyze_logistics_data, analyze_pdf_logistics, get_db_transport_advice
+    import logging
+    logger = logging.getLogger(__name__)
+except ImportError:
+    def get_rag_response(q, context=None): return {"answer": "답변입니다.", "has_table": False}
+    def submit_feedback(q, s, c, src): pass
+    import logging
+    logger = logging.getLogger(__name__)
+
 load_dotenv()
 
-# ---------- 초기 설정 ----------
-st.set_page_config(page_title="물류 AI 챗봇 (RAG)", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="물류 AI 챗봇 (RAG)", 
+    layout="wide", 
+    initial_sidebar_state="expanded"
+)
 
-st.markdown(
-    """
+# --- CSS 스타일 ---
+st.markdown("""
     <style>
-    .stApp {
-        background-color: #0f1720;
-        color: #e6eef8;
-    }
-    .app-logo {
-        position: fixed;
-        top: 10px;
-        left: 18px;
-        z-index: 999;
-        font-weight: 800;
-        font-size: 20px;
-        color: #ff4d4f;
-        letter-spacing: 2px;
-    }
-    .chat-container {
-        padding-top: 48px;
-    }
+    /* 기본 채팅 버블 */
     .chat-bubble {
-        max-width: 78%;
-        padding: 12px 14px;
-        border-radius: 14px;
-        margin-bottom: 8px;
-        line-height: 1.4;
-        font-size: 14px;
+        max-width: 85%; padding: 16px 20px; border-radius: 14px;
+        margin-bottom: 12px; line-height: 1.6; font-size: 14px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
     }
     .chat-bubble.user {
-        background: linear-gradient(90deg, rgba(38,99,255,0.12), rgba(38,99,255,0.08));
-        color: #dbeafe;
-        border-top-right-radius: 4px;
-        margin-left: auto;
-        text-align: left;
+        background: rgba(59, 130, 246, 0.15); color: #3b82f6; 
+        margin-left: auto; border-left: 4px solid #3b82f6;
     }
     .chat-bubble.assistant {
-        background: rgba(255,255,255,0.03);
-        color: #e6eef8;
-        border-top-left-radius: 4px;
-        margin-right: auto;
-        text-align: left;
-    }
-    .conversation-item {
-        padding: 10px;
-        margin: 5px 0;
-        background: rgba(255,255,255,0.05);
-        border-radius: 8px;
-        cursor: pointer;
-        transition: background 0.2s;
-    }
-    .conversation-item:hover {
-        background: rgba(255,255,255,0.1);
-    }
-    .conversation-title {
-        font-size: 14px;
-        font-weight: 600;
-        color: #e6eef8;
-        margin-bottom: 4px;
-    }
-    .conversation-date {
-        font-size: 11px;
-        color: #888;
-    }
-    .active-conversation {
-        background: rgba(38,99,255,0.15);
-        border-left: 3px solid #2663ff;
-    }
-    .css-1d391kg {
-        padding-top: 52px;
-    }
-    .stButton>button {
-        border-radius: 8px;
+        background: rgba(148, 163, 184, 0.1); color: inherit; 
+        margin-right: auto; border-left: 4px solid #10b981;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+    }   
+    
+    /* 답변 컨테이너 */
+    .answer-container {
         width: 100%;
     }
+    
+    /* 핵심 요약 */
+    .answer-summary {
+        background: linear-gradient(135deg, rgba(59, 130, 246, 0.12), rgba(16, 185, 129, 0.12));
+        padding: 14px 18px; border-radius: 12px; 
+        border-left: 4px solid #3b82f6;
+        font-weight: 600; margin-bottom: 14px;
+        font-size: 15px; line-height: 1.6;
+    }
+    
+    /* 세부 내용 */
+    .answer-details {
+        background: rgba(248, 250, 252, 0.5);
+        padding: 14px 18px; border-radius: 10px;
+        border: 1px solid rgba(226, 232, 240, 0.6);
+        margin-top: 12px;
+    }
+    .detail-item {
+        padding: 6px 0;
+        border-bottom: 1px solid rgba(226, 232, 240, 0.3);
+        line-height: 1.6;
+        font-size: 14px;
+    }
+    .detail-item strong { 
+        color: #1e40af; 
+        margin-right: 6px; 
+        font-size: 14px;
+        display: inline-block;
+    }
+    
+    /* 추천 질문 스타일 */
+    .suggestion-container {
+        background: linear-gradient(135deg, rgba(236, 254, 255, 0.8), rgba(254, 249, 195, 0.8));
+        padding: 20px;
+        border-radius: 16px;
+        margin: 20px 0;
+        border: 2px solid rgba(6, 182, 212, 0.3);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    }
+    .suggestion-title {
+        font-size: 18px;
+        font-weight: 700;
+        color: #0e7490;
+        margin-bottom: 16px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
     </style>
-    """,
-    unsafe_allow_html=True,
-)
-st.markdown('<div class="app-logo">DRB</div>', unsafe_allow_html=True)
-st.title("📦DRB LOGIBOT-AI (물류팀 챗봇)")
+    """, unsafe_allow_html=True)
 
-# ---------- 세션 상태 초기화 ----------
+# --- 추천 질문 데이터 ---
+TEAM_SUGGESTIONS = {
+    "국내영업팀": [
+        "국내 배차 신청 방법(수동/자동)",
+        "주문 마감 시간",
+        "내수용 PLT 규격 리스트",
+        "부산 지입기사 정보",
+        "추가 운임이 발생하는 항목",
+        "국내 담당자에 대한 정보"
+    ],
+    "해외영업팀": [
+        "수출 포장량 계산 기준",
+        "컨테이너 적재 시뮬레이션",
+        "수출용 BOX 종류",
+        "샘플 보내는 방법",
+        "컨베어벨트 직경을 구하는 방법",
+        "수출 선적 서류 준비 리스트"
+    ],
+    "트랙영업팀": [
+        "RT 종류별 적재 용량",
+        "RT 배차 시뮬레이션",
+        "RT 포장 규격",
+        "RT 지게차 지원하는 방법",
+        "배차 차량별 제원",
+        "크롤러 담당자 정보"
+    ]
+}
+
+# --- 세션 상태 초기화 ---
+def _init_team_conv(team: str) -> dict:
+    """팀 전용 초기 대화 생성"""
+    greet = {
+        "국내영업팀": "안녕하세요! 🚚 국내영업팀 전용 DRB 물류 AI입니다. 무엇을 도와드릴까요?",
+        "해외영업팀": "안녕하세요! 🚢 해외영업팀 전용 DRB 물류 AI입니다. 무엇을 도와드릴까요?",
+        "트랙영업팀": "안녕하세요! 🚜 트랙영업팀 전용 DRB 물류 AI입니다. 무엇을 도와드릴까요?",
+    }
+    return {
+        "init": {
+            "title": "새 대화",
+            "messages": [{
+                "role": "assistant",
+                "content": greet.get(team, "안녕하세요! DRB 물류 AI입니다."),
+                "timestamp": datetime.now().isoformat(),
+                "has_table": False
+            }],
+            "context": []
+        }
+    }
+
+if "team_conversations" not in st.session_state:
+    st.session_state.team_conversations = {
+        t: _init_team_conv(t) for t in ["국내영업팀", "해외영업팀", "트랙영업팀"]
+    }
+
+if "team_current_id" not in st.session_state:
+    st.session_state.team_current_id = {
+        t: "init" for t in ["국내영업팀", "해외영업팀", "트랙영업팀"]
+    }
+
 if "conversations" not in st.session_state:
-    st.session_state["conversations"] = {}
+    # 하위 호환: 기존 conversations 키 → 현재 팀 세션으로 연결
+    st.session_state.conversations = st.session_state.team_conversations[
+        st.session_state.get("selected_team", "국내영업팀")
+    ]
+    st.session_state.current_id = st.session_state.team_current_id[
+        st.session_state.get("selected_team", "국내영업팀")
+    ]
 
-if "current_conversation_id" not in st.session_state:
-    new_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    st.session_state["current_conversation_id"] = new_id
-    st.session_state["conversations"][new_id] = {
-        "title": "새 대화",
-        "created_at": datetime.now().isoformat(),
-        "messages": [{"role": "assistant", "content": "안녕하세요! 궁금한 점을 질문해 주세요."}]
-    }
+if "feedback_done" not in st.session_state:
+    st.session_state.feedback_done = set()
+if "editing_id" not in st.session_state:
+    st.session_state.editing_id = None
+if "pending_query" not in st.session_state:
+    st.session_state.pending_query = None
+if "show_suggestions" not in st.session_state:
+    st.session_state.show_suggestions = True
+# 비동기 보호 플래그
+if "is_generating" not in st.session_state:
+    st.session_state.is_generating = False   # LLM 호출 중 여부
+if "queued_query" not in st.session_state:
+    st.session_state.queued_query = None     # 생성 중 들어온 질문 대기열
 
-if "system_prompt" not in st.session_state:
-    st.session_state["system_prompt"] = """당신은 물류 업무 전문가입니다. 
+def extract_table_from_text(text: str) -> tuple:
+    """
+    텍스트에서 마크다운 표를 모두 찾아 HTML 표로 변환.
+    반환: (변환된 전체 HTML 텍스트, None)  — DataFrame은 더 이상 사용하지 않음.
+    """
+    import re as _re
 
-    답변 시 다음 형식을 따르세요:
-    1. 핵심 요약을 먼저 2-3줄로 작성
-    2. 세부 내용은 번호를 매겨 구조화
-    3. 절차나 프로세스는 단계별로 명확히 구분
-    4. 특수문자(**, ###, 등)는 사용하지 마세요
-    5. 답변은 실무에 바로 적용 가능하도록 구체적으로 작성
+    def render_one_table(table_lines: list) -> str:
+        """마크다운 표 줄 목록 → HTML <table>"""
+        rows = [l for l in table_lines
+                if l.strip() and not _re.match(r'^\s*\|[\s\-:|]+\|\s*$', l)]
+        if not rows:
+            return ""
 
-    간결하지만 핵심을 놓치지 않는 답변을 제공하세요."""
+        html = (
+            '<div style="overflow-x:auto;margin:10px 0;">'
+            '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
+        )
+        for i, row in enumerate(rows):
+            cells = [c.strip() for c in row.strip().strip('|').split('|')]
+            tag = 'th' if i == 0 else 'td'
+            if i == 0:
+                # 헤더: 다크모드에서도 보이는 중간 톤 배경
+                cell_style = (
+                    'background:rgba(99,102,241,0.75);color:#ffffff;'
+                    'padding:8px 12px;text-align:left;font-weight:700;white-space:nowrap;'
+                )
+            else:
+                bg = 'rgba(0,0,0,0.03)' if i % 2 == 0 else 'transparent'
+                cell_style = (
+                    f'background:{bg};padding:7px 12px;'
+                    'border-bottom:1px solid rgba(148,163,184,0.25);vertical-align:top;'
+                )
+            html += '<tr>' + ''.join(
+                f'<{tag} style="{cell_style}">{c}</{tag}>' for c in cells
+            ) + '</tr>'
+        html += '</table></div>'
+        return html
 
-if "feedback_submitted" not in st.session_state:
-    st.session_state["feedback_submitted"] = set()
+    # 표 블록 전체를 HTML로 교체
+    lines = text.split('\n')
+    result = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # 표 시작 감지 (|로 시작하거나 다음 줄이 구분선)
+        is_table_row = '|' in line and line.strip().startswith('|')
+        next_is_sep  = (i + 1 < len(lines) and
+                        _re.match(r'^\s*\|[\s\-:|]+\|\s*$', lines[i + 1]))
+        if is_table_row or next_is_sep:
+            # 표 블록 수집
+            table_buf = []
+            while i < len(lines) and '|' in lines[i] and lines[i].strip():
+                table_buf.append(lines[i])
+                i += 1
+            html_table = render_one_table(table_buf)
+            if html_table:
+                result.append(html_table)
+            else:
+                result.extend(table_buf)  # 변환 실패 시 원문 유지
+            continue
+        result.append(line)
+        i += 1
 
-if "rename_mode" not in st.session_state:
-    st.session_state["rename_mode"] = None
+    return None, '\n'.join(result)   # DataFrame 자리는 None
 
-# ✅ 개선: 각 메시지에 대한 sources 저장
-if "message_sources" not in st.session_state:
-    st.session_state["message_sources"] = {}
 
-# ---------- 헬퍼 함수 ----------
-def get_current_messages():
-    """현재 대화의 메시지 리스트 반환"""
-    conv_id = st.session_state["current_conversation_id"]
-    return st.session_state["conversations"][conv_id]["messages"]
+def md_to_html_answer(text: str) -> str:
+    """
+    LLM 마크다운 답변 → chat-bubble HTML 변환.
+    - 표: extract_table_from_text가 이미 HTML로 변환해둠
+    - ## 헤더: 다크/라이트 모드 모두 보이는 색상 (inherit 사용)
+    - **bold**: 색상 고정 제거 → 모드에 따라 자동
+    - 리스트, 구분선, 줄바꿈
+    """
+    import re as _re
 
-def add_message(role, content, sources=None):
-    """현재 대화에 메시지 추가"""
-    conv_id = st.session_state["current_conversation_id"]
-    msg_index = len(st.session_state["conversations"][conv_id]["messages"])
-    
-    st.session_state["conversations"][conv_id]["messages"].append({
-        "role": role,
-        "content": content
-    })
-    
-    # ✅ sources 정보 저장
-    if sources is not None:
-        st.session_state["message_sources"][f"{conv_id}_{msg_index}"] = sources
-    
-    # 첫 메시지인 경우 대화 제목 업데이트
-    if len(st.session_state["conversations"][conv_id]["messages"]) == 2:
-        title = content[:30] + "..." if len(content) > 30 else content
-        st.session_state["conversations"][conv_id]["title"] = title
+    lines = text.split('\n')
+    result_lines = []
+    i = 0
 
-def get_message_sources(msg_index):
-    """특정 메시지의 sources 조회"""
-    conv_id = st.session_state["current_conversation_id"]
-    return st.session_state["message_sources"].get(f"{conv_id}_{msg_index}", [])
+    while i < len(lines):
+        line = lines[i]
 
-def create_new_conversation():
-    """새 대화 생성"""
-    new_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    st.session_state["current_conversation_id"] = new_id
-    st.session_state["conversations"][new_id] = {
-        "title": "새 대화",
-        "created_at": datetime.now().isoformat(),
-        "messages": [{"role": "assistant", "content": "안녕하세요! 궁금한 점을 질문해 주세요."}]
-    }
+        # 이미 HTML 태그인 줄 (표 HTML 등) → 그대로 통과
+        if line.strip().startswith('<') and '>' in line:
+            result_lines.append(line)
+            i += 1
+            continue
 
-def switch_conversation(conv_id):
-    """다른 대화로 전환"""
-    st.session_state["current_conversation_id"] = conv_id
-    st.session_state["rename_mode"] = None
-
-def delete_current_conversation():
-    """현재 대화 삭제"""
-    conv_id = st.session_state["current_conversation_id"]
-    if len(st.session_state["conversations"]) > 1:
-        del st.session_state["conversations"][conv_id]
-        remaining_ids = sorted(st.session_state["conversations"].keys(), reverse=True)
-        st.session_state["current_conversation_id"] = remaining_ids[0]
-    else:
-        st.session_state["conversations"][conv_id]["messages"] = [
-            {"role": "assistant", "content": "안녕하세요! 궁금한 점을 질문해 주세요."}
-        ]
-        st.session_state["conversations"][conv_id]["title"] = "새 대화"
-    st.session_state["rename_mode"] = None
-
-def rename_conversation(conv_id, new_title):
-    """대화 제목 변경"""
-    if new_title.strip():
-        st.session_state["conversations"][conv_id]["title"] = new_title.strip()
-    st.session_state["rename_mode"] = None
-
-# ---------- 사이드바 (대화 목록) ----------
-with st.sidebar:
-    st.header("💬 대화 목록")
-    
-    if st.button("새 대화 시작", use_container_width=True):
-        create_new_conversation()
-        st.rerun()
-    
-    st.markdown("---")
-    
-    sorted_convs = sorted(
-        st.session_state["conversations"].items(),
-        key=lambda x: x[1]["created_at"],
-        reverse=True
-    )
-    
-    for conv_id, conv_data in sorted_convs:
-        is_active = conv_id == st.session_state["current_conversation_id"]
-        
-        if st.session_state["rename_mode"] == conv_id:
-            new_title = st.text_input(
-                "새 제목",
-                value=conv_data["title"],
-                key=f"rename_input_{conv_id}",
-                label_visibility="collapsed"
+        # 헤더 (###, ##, #) — 다크모드 대응: color 고정 제거, border만 유지
+        h = _re.match(r'^(#{1,3})\s+(.+)$', line)
+        if h:
+            level = len(h.group(1))
+            size  = {1: '1.2em', 2: '1.1em', 3: '1.0em'}.get(level, '1.0em')
+            result_lines.append(
+                f'<div style="font-size:{size};font-weight:700;'
+                f'margin:14px 0 6px;'
+                f'border-bottom:2px solid rgba(99,102,241,0.4);padding-bottom:4px;">'
+                f'{h.group(2)}</div>'
             )
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("✅ 확인", key=f"confirm_{conv_id}", use_container_width=True):
-                    rename_conversation(conv_id, new_title)
-                    st.rerun()
-            with col2:
-                if st.button("❌ 취소", key=f"cancel_{conv_id}", use_container_width=True):
-                    st.session_state["rename_mode"] = None
-                    st.rerun()
-        else:
-            button_label = f"{'🟢 ' if is_active else '⚪ '}{conv_data['title']}"
-            
-            col1, col2, col3 = st.columns([3, 1, 1])
-            
-            with col1:
-                if st.button(button_label, key=f"conv_{conv_id}", use_container_width=True):
-                    if not is_active:
-                        switch_conversation(conv_id)
-                        st.rerun()
-            
-            with col2:
-                if is_active:
-                    if st.button("✏️", key=f"edit_{conv_id}"):
-                        st.session_state["rename_mode"] = conv_id
-                        st.rerun()
-            
-            with col3:
-                if is_active:
-                    if st.button("🗑️", key=f"del_{conv_id}"):
-                        delete_current_conversation()
-                        st.rerun()
-            
-            created_dt = datetime.fromisoformat(conv_data["created_at"])
-            st.caption(created_dt.strftime("%m/%d %H:%M"))
-        
-        if conv_id != sorted_convs[-1][0]:
-            st.markdown("---") 
-    
-    st.markdown("---")
-    
-    if st.button("현재 대화 내보내기", use_container_width=True):
-        conv_id = st.session_state["current_conversation_id"]
-        conv_data = st.session_state["conversations"][conv_id]
-        payload = json.dumps(conv_data, ensure_ascii=False, indent=2)
-        st.download_button(
-            "다운로드 JSON",
-            data=payload,
-            file_name=f"conversation_{conv_id}.json",
-            mime="application/json",
-            use_container_width=True
+            i += 1
+            continue
+
+        # 구분선
+        if _re.match(r'^[-─━]{3,}$', line.strip()):
+            result_lines.append(
+                '<hr style="border:none;border-top:1px solid rgba(148,163,184,0.3);margin:10px 0;">'
+            )
+            i += 1
+            continue
+
+        # 빈 줄
+        if not line.strip():
+            result_lines.append('<div style="height:5px;"></div>')
+            i += 1
+            continue
+
+        # 숫자 리스트
+        if _re.match(r'^\d+\.\s+', line):
+            ol_items = []
+            while i < len(lines) and _re.match(r'^\d+\.\s+', lines[i]):
+                item_text = _re.sub(r'^\d+\.\s+', '', lines[i])
+                ol_items.append(f'<li style="margin:5px 0;line-height:1.6;">{_inline_fmt(item_text)}</li>')
+                i += 1
+            result_lines.append(
+                '<ol style="margin:6px 0 8px 22px;padding:0;">' + ''.join(ol_items) + '</ol>'
+            )
+            continue
+
+        # 불릿 리스트
+        if _re.match(r'^[\-\*•]\s+', line):
+            ul_items = []
+            while i < len(lines) and _re.match(r'^[\-\*•]\s+', lines[i]):
+                item_text = _re.sub(r'^[\-\*•]\s+', '', lines[i])
+                ul_items.append(f'<li style="margin:5px 0;line-height:1.6;">{_inline_fmt(item_text)}</li>')
+                i += 1
+            result_lines.append(
+                '<ul style="margin:6px 0 8px 22px;padding:0;">' + ''.join(ul_items) + '</ul>'
+            )
+            continue
+
+        # 일반 텍스트
+        result_lines.append(_inline_fmt(line) + '<br>')
+        i += 1
+
+    return '\n'.join(result_lines)
+
+
+def _inline_fmt(text: str) -> str:
+    """
+    인라인 마크다운 변환.
+    bold/italic 색상 고정 제거 → 다크/라이트 모드 자동 대응
+    """
+    import re as _re
+    # **굵게** — 색상 inherit, font-weight만 지정
+    text = _re.sub(
+        r'\*\*(.+?)\*\*',
+        r'<strong style="font-weight:700;">\1</strong>',
+        text
+    )
+    # *기울임*
+    text = _re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
+    # `코드`
+    text = _re.sub(
+        r'`(.+?)`',
+        r'<code style="background:rgba(99,102,241,0.1);padding:1px 5px;'
+        r'border-radius:3px;font-size:0.9em;">\1</code>',
+        text
+    )
+    return text
+
+
+def _inline_format(text: str) -> str:
+    """하위 호환 alias"""
+    return _inline_fmt(text)
+
+
+def format_answer_display(content: str, has_table: bool = False) -> tuple:
+    """
+    답변 포맷팅.
+    표를 HTML로 변환한 뒤 마크다운 전체를 HTML로 변환.
+    반환: (html_string, None)  — 두 번째 값은 하위 호환용 None
+    """
+    _, content_with_tables = extract_table_from_text(content)
+    formatted_body = md_to_html_answer(content_with_tables.strip())
+    return formatted_body, None
+
+def make_conversation_title(query: str) -> str:
+    """첫 질문을 대화 제목으로 변환 (최대 18자 + 말줄임)"""
+    title = query.strip().replace("\n", " ")
+    return title[:18] + "…" if len(title) > 18 else title
+
+
+def process_user_query(query):
+    curr_conv = st.session_state.conversations[st.session_state.current_id]
+
+    # [중복 방지]
+    if curr_conv["messages"] and curr_conv["messages"][-1].get("content") == query:
+        return
+
+    # [생성 중 보호] — 이미 LLM 호출 중이면 대기열에 저장하고 종료
+    if st.session_state.is_generating:
+        st.session_state.queued_query = query
+        st.toast("⏳ 이전 답변 생성 중입니다. 완료 후 자동으로 처리됩니다.", icon="⏳")
+        return
+
+    # 1. 첫 질문이면 대화 제목 자동 설정
+    user_msgs = [m for m in curr_conv["messages"] if m["role"] == "user"]
+    if len(user_msgs) == 0:
+        curr_conv["title"] = make_conversation_title(query)
+
+    # 2. 사용자 질문 추가
+    curr_conv["messages"].append({
+        "role": "user",
+        "content": query,
+        "timestamp": datetime.now().isoformat()
+    })
+    st.session_state.last_query = query
+
+    # 3. 생성 시작 플래그 ON
+    st.session_state.is_generating = True
+
+    try:
+        # 4. 답변 생성
+        with st.spinner("🤖 답변 생성 중... (다른 메뉴를 클릭하면 완료 후 반영됩니다)"):
+            response   = get_rag_response(query, context=curr_conv.get("context", []))
+            answer_text = response.get('answer', "")
+
+            curr_conv["messages"].append({
+                "role"      : "assistant",
+                "content"   : answer_text,
+                "sources"   : response.get('sources', []),
+                "timestamp" : datetime.now().isoformat(),
+                "has_table" : response.get('has_table', False)
+            })
+
+            # 5. 대화 컨텍스트 누적 (최대 10턴)
+            MAX_CONTEXT_TURNS = 10
+            if "context" not in curr_conv:
+                curr_conv["context"] = []
+            curr_conv["context"].append({
+                "query"    : query,
+                "answer"   : answer_text,
+                "timestamp": datetime.now().isoformat()
+            })
+            if len(curr_conv["context"]) > MAX_CONTEXT_TURNS:
+                curr_conv["context"] = curr_conv["context"][-MAX_CONTEXT_TURNS:]
+
+    finally:
+        # 6. 생성 완료 — 무조건 플래그 해제 (예외 발생해도 잠금 풀림)
+        st.session_state.is_generating = False
+
+    # 7. 대기 중인 질문이 있으면 pending으로 넘겨 다음 rerun에서 처리
+    if st.session_state.queued_query:
+        st.session_state.pending_query = st.session_state.queued_query
+        st.session_state.queued_query  = None
+
+    st.rerun()
+
+# --- 사이드바 ---
+with st.sidebar:
+    # 생성 중 상태 배너
+    if st.session_state.is_generating:
+        st.markdown(
+            '<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;'
+            'padding:10px 14px;margin-bottom:10px;font-size:13px;color:#92400e;">'
+            '⏳ <strong>답변 생성 중...</strong><br>'
+            '<span style="font-size:11px;">완료 후 다른 메뉴가 활성화됩니다</span>'
+            '</div>',
+            unsafe_allow_html=True
         )
 
-# ---------- 메인: 채팅 영역 ----------
-col1, col2 = st.columns([3, 1])
+    # 1. 부서 선택 탭 (최상단 고정)
+    st.markdown("### 🏢 부서 모드 선택")
+    team_options = {"국내영업팀": "🚚", "해외영업팀": "🚢", "트랙영업팀": "🚜"}
 
-with col1:
-    st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+    generating = st.session_state.is_generating   # 짧은 alias
+    team_cols = st.columns(3)
+    for idx, (t_name, t_icon) in enumerate(team_options.items()):
+        is_selected = (st.session_state.selected_team == t_name)
+        # 생성 중이면 버튼 비활성화
+        btn_clicked = team_cols[idx].button(
+            f"{t_icon}\n{t_name[:2]}",
+            key=f"sidebar_team_{t_name}",
+            use_container_width=True,
+            type="primary" if is_selected else "secondary",
+            disabled=generating
+        )
+        if btn_clicked and not generating:
+            if st.session_state.selected_team != t_name:
+                # 현재 팀 상태 저장
+                cur = st.session_state.selected_team
+                st.session_state.team_conversations[cur] = st.session_state.conversations
+                st.session_state.team_current_id[cur] = st.session_state.current_id
+                # 새 팀 세션으로 전환
+                st.session_state.selected_team = t_name
+                st.session_state.conversations = st.session_state.team_conversations[t_name]
+                st.session_state.current_id = st.session_state.team_current_id[t_name]
+                st.session_state.editing_id = None
+                st.session_state.show_suggestions = True
+            st.rerun()
 
-    messages = get_current_messages()
+    st.markdown(f"**현재 모드:** `{st.session_state.selected_team}`")
+    st.markdown("---")
+
+    st.title("💬 대화 목록")
     
-    for idx, msg in enumerate(messages):
-        role = msg.get("role", "assistant")
-        content = msg.get("content", "")
-        
-        if role == "user":
-            st.markdown(f'<div class="chat-bubble user">{content}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="chat-bubble assistant">{content}</div>', unsafe_allow_html=True)
-            
-            # ✅ 개선: 답변에 대한 피드백 버튼 (sources 포함)
-            if idx > 0 and idx not in st.session_state["feedback_submitted"]:
-                col1, col2, col3 = st.columns([1, 1, 8])
-                
-                with col1:
-                    if st.button("👍", key=f"good_{idx}"):
-                        user_query = messages[idx-1]["content"] if idx > 0 else ""
-                        bot_answer = content
-                        sources = get_message_sources(idx)  # ✅ sources 조회
-                        
-                        submit_feedback(user_query, 1.0, bot_answer, sources)
-                        st.session_state["feedback_submitted"].add(idx)
-                        st.success("피드백 감사합니다! 👍")
-                        time.sleep(1)
-                        st.rerun()
-
-                with col2:
-                    if st.button("👎", key=f"bad_{idx}"):
-                        user_query = messages[idx-1]["content"] if idx > 0 else ""
-                        bot_answer = content
-                        sources = get_message_sources(idx)  # ✅ sources 조회
-                        
-                        submit_feedback(user_query, 0.0, bot_answer, sources)
-                        st.session_state["feedback_submitted"].add(idx)
-                        st.warning("피드백 감사합니다. 개선하겠습니다! 👎")
-                        time.sleep(1)
-                        st.rerun()
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    prompt = st.chat_input("메시지를 입력하고 Enter를 누르세요...")
-
-    def call_rag(prompt_text):
-        """get_rag_response 호출"""
-        try:
-            result = get_rag_response(prompt_text)
-            if isinstance(result, dict):
-                return result.get('answer', str(result)), result.get('sources', [])
-            return str(result), []
-        except Exception as e:
-            return f"응답 생성 중 오류가 발생했습니다: {e}", []
-
-    if prompt:
-        add_message("user", prompt)
+    if st.button("새 대화 시작", use_container_width=True, disabled=generating):
+        cur_team = st.session_state.selected_team
+        greet_map = {
+            "국내영업팀": "안녕하세요! 🚚 국내영업팀 전용 DRB 물류 AI입니다. 무엇을 도와드릴까요?",
+            "해외영업팀": "안녕하세요! 🚢 해외영업팀 전용 DRB 물류 AI입니다. 무엇을 도와드릴까요?",
+            "트랙영업팀": "안녕하세요! 🚜 트랙영업팀 전용 DRB 물류 AI입니다. 무엇을 도와드릴까요?",
+        }
+        new_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_conv = {
+            "title": "새 대화",
+            "messages": [{
+                "role": "assistant",
+                "content": greet_map.get(cur_team, "안녕하세요! DRB 물류 AI입니다."),
+                "timestamp": datetime.now().isoformat(),
+                "has_table": False
+            }],
+            "context": []
+        }
+        st.session_state.conversations[new_id] = new_conv
+        st.session_state.team_conversations[cur_team][new_id] = new_conv
+        st.session_state.current_id = new_id
+        st.session_state.team_current_id[cur_team] = new_id
+        st.session_state.editing_id = None
+        st.session_state.show_suggestions = True
         st.rerun()
+        st.markdown("---")
+        
+    # 대화 목록
+    for cid in list(st.session_state.conversations.keys()):
+        data = st.session_state.conversations[cid]
+        is_active = (cid == st.session_state.current_id)
+        
+        if st.button(
+            f"{'🔵' if is_active else '⚪'} {data['title']}",
+            key=f"nav_{cid}",
+            use_container_width=True,
+            disabled=generating
+        ):
+            st.session_state.current_id = cid
+            st.session_state.editing_id = None
+            st.rerun()
+        
+        if is_active:
+            col_edit, col_del = st.columns(2)
+            with col_edit:
+                if st.button("✏️", key=f"edit_{cid}", use_container_width=True, disabled=generating):
+                    st.session_state.editing_id = cid
+            with col_del:
+                if st.button("🗑️", key=f"del_{cid}", use_container_width=True, disabled=generating):
+                    if len(st.session_state.conversations) > 1:
+                        del st.session_state.conversations[cid]
+                        st.session_state.current_id = list(st.session_state.conversations.keys())[0]
+                        st.toast("대화가 삭제되었습니다.")
+                        st.rerun()
+                    else:
+                        st.warning("마지막 대화는 삭제할 수 없습니다.")
 
-# ---------- 응답 생성 로직 ----------
-def need_response():
-    messages = get_current_messages()
-    if not messages:
-        return False
-    if messages[-1]["role"] == "user":
-        return True
-    return False
+            if st.session_state.editing_id == cid:
+                new_title = st.text_input("새 제목 입력:", value=data['title'], key=f"input_{cid}")
+                if st.button("확인", key=f"confirm_{cid}"):
+                    st.session_state.conversations[cid]['title'] = new_title
+                    st.session_state.editing_id = None
+                    st.rerun()
+                    
+    st.markdown("---")
+    st.subheader("📁 데이터 분석 요청")
+    uploaded_file = st.file_uploader(
+        "파일을 올려주세요", 
+        type=["xlsx", "csv", "pdf"] # pdf 추가
+    )
 
-if need_response():
-    messages = get_current_messages()
-    user_msg = messages[-1]["content"]
-    
-    composed_prompt = f"""당신은 물류 전문가입니다.
-
-    답변 형식 요구사항:
-    - 핵심 내용을 먼저 1-2줄로 요약
-    - 세부 내용은 번호나 bullet point로 구조화
-    - 절차는 단계별로 명확히 구분
-    - 중요 키워드는 강조
-
-    사용자 질문: {user_msg}
-
-    위 형식을 반드시 지켜서 한국어로 답변해주세요."""
-    
-    # ✅ 개선: 로딩 메시지
-    with st.spinner("🤖 답변 생성 중..."):
-        add_message("assistant", "응답 생성 중...")
+    if uploaded_file:
+        file_name = uploaded_file.name.lower()
         
         try:
-            result, sources = call_rag(composed_prompt)  # ✅ sources도 받기
-            messages = get_current_messages()
-            msg_idx = len(messages) - 1
-            messages[-1] = {"role": "assistant", "content": result}
-            
-            # ✅ sources 저장
-            conv_id = st.session_state["current_conversation_id"]
-            st.session_state["message_sources"][f"{conv_id}_{msg_idx}"] = sources
-            
+            if file_name.endswith(('.xlsx', '.xls')):
+                # 엑셀 파일 처리
+                df = pd.read_excel(uploaded_file)
+                st.success("✅ 엑셀 파일을 성공적으로 불러왔습니다.")
+                
+            elif file_name.endswith('.csv'):
+                # CSV 파일 처리 (인코딩 문제 방지를 위해 cp949 추가)
+                try:
+                    df = pd.read_csv(uploaded_file, encoding='utf-8')
+                except UnicodeDecodeError:
+                    df = pd.read_csv(uploaded_file, encoding='cp949')
+                st.success("✅ CSV 파일을 성공적으로 불러왔습니다.")
+                
+            elif file_name.endswith('.pdf'):
+                # PDF 파일 처리 (데이터프레임으로 변환하지 않고 텍스트로만 처리)
+                st.info("📄 PDF 파일이 감지되었습니다. 'PDF 데이터 해석' 버튼을 눌러주세요.")
+                df = None  # PDF는 표 형태가 아닐 수 있으므로 None 처리
+                
+            else:
+                st.error("❌ 지원하지 않는 파일 형식입니다.")
+                df = None
+
+            # --- 분석 및 시뮬레이션 버튼 ---
+            if df is not None:
+                st.dataframe(df.head(3)) # 미리보기 표시
+                if st.button("🚛 배차 시뮬레이션 실행"):
+                    analysis_text = analyze_logistics_data(df)
+                    st.session_state.pending_query = analysis_text
+                    st.rerun()
+                    
+            elif file_name.endswith('.pdf'):
+                if file_name.endswith('.pdf'):
+                    if st.button("📄 PDF 데이터 해석"):
+                        # 파일을 읽기 전 포인터를 맨 앞으로 이동
+                        uploaded_file.seek(0)
+                        file_bytes = uploaded_file.read()
+                        
+                        # 함수 호출
+                        pdf_result = analyze_pdf_logistics(file_bytes)
+                        
+                        # 결과 출력 및 채팅 세션 저장
+                        st.session_state.pending_query = pdf_result
+                        st.rerun()
+
         except Exception as e:
-            messages = get_current_messages()
-            messages[-1] = {"role": "assistant", "content": f"응답 생성 중 오류가 발생했습니다: {e}"}
+            st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")      
+        st.markdown("---")           
+        
+    # 1. 표준 데이터 매핑 (딕셔너리 구조)
+    # { '포장재명': 박스당 순중량(kg) }
+    PACKING_WEIGHTS = {
+        "제품-600박스": 15.0, "제품-650박스": 18.0, "제품-1090박스": 25.0,
+        "제품-세미박스": 10.0, "제품-마대": 30.0, "슬리브-600박스": 12.0,
+        "슬리브-650박스": 14.0, "슬리브-세미박스": 8.0
+    }
+    # 팔레트당 적재 박스 수 (자재그룹별 예시)
+    GROUP_PALLET_LIMIT = {
+        "B01": 20, "B02": 20, "N18": 20, "N19": 20
+    }
     
-    st.rerun()
+    current_team = st.session_state.selected_team
+
+    if current_team == "해외영업팀":
+        st.subheader("📦 수출 포장량 시뮬레이터", divider="rainbow")
+        with st.container(border=True):
+            total_target_weight = st.number_input("목표 총 중량 (kg)", min_value=0.0, value=800.0, step=10.0)
+            
+            # 자재그룹 및 포장재 선택
+            selected_group = st.selectbox("자재그룹", options=["선택하세요"] + list(GROUP_PALLET_LIMIT.keys()))
+            selected_packing = st.selectbox("포장재 종류", options=["선택하세요"] + list(PACKING_WEIGHTS.keys()))
+
+        # --- 계산 및 결과 출력 (자재/포장재가 선택되었을 때만) ---
+        if selected_group != "선택하세요" and selected_packing != "선택하세요":
+            unit_w = PACKING_WEIGHTS[selected_packing]
+            box_limit = GROUP_PALLET_LIMIT[selected_group]
+            
+            # 1. 기본 계산 로직
+            calc_boxes = total_target_weight / unit_w
+            calc_pallets = calc_boxes / box_limit
+            
+            st.markdown("#### 📊 시뮬레이션 결과")
+            
+            # 결과 대시보드
+            res_col1, res_col2 = st.columns(2)
+            with res_col1:
+                st.metric("필요 박스", f"{calc_boxes:.1f} PKG")
+            with res_col2:
+                st.metric("필요 PLT", f"{calc_pallets:.1f} PLT")
+                
+            st.caption(f"ℹ️ 적용 기준: 박스당 {unit_w}kg / PLT당 {box_limit}박스")
+            
+            # 2. 배차 및 컨테이너 분석
+            best_truck = get_db_transport_advice(calc_pallets)
+    
+            with st.expander("🚚 배차 및 컨테이너 분석", expanded=True):
+                if best_truck:
+                    st.success(f"**추천 차량:** {best_truck['name']}")
+                    st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
+                    st.write(f"📦 **최대 적재 가능:** {best_truck['max_plt']} PLT")
+                    
+                    # --- [추가/수정] 컨테이너 최적화 및 추가 적재량 계산 ---
+                    # 컨테이너 기준: 20ft(10 PLT), 40ft(20 PLT)
+                    if calc_pallets <= 10:
+                        cntr_type = "20ft"
+                        max_cntr_plt = 10
+                    else:
+                        cntr_type = "40ft"
+                        max_cntr_plt = 20
+                    
+                    cntr_count = int((calc_pallets // max_cntr_plt) + (1 if calc_pallets % max_cntr_plt > 0 else 0))
+                    st.info(f"🚢 **해외 운송 : {cntr_type} 컨테이너 {cntr_count}대 예상**")
+
+                    # 남은 공간 계산 (마지막 컨테이너 기준)
+                    used_last_plt = calc_pallets % max_cntr_plt
+                    if used_last_plt == 0 and calc_pallets > 0:
+                        used_last_plt = max_cntr_plt
+                    
+                    rem_plt = max_cntr_plt - used_last_plt
+
+                    if rem_plt > 0:
+                        st.markdown(f"**💡 풀 컨테이너(FCL)를 위한 추가 가능량** (남은 공간: {rem_plt:.2f} PLT)")
+                        
+                        # 요청하신 자재그룹 리스트
+                        target_groups = ["B01", "B02", "N18", "N19"]
+                        
+                        # UI 구성을 위한 컬럼 생성
+                        add_cols = st.columns(2)
+                        for idx, g_code in enumerate(target_groups):
+                            with add_cols[idx % 2]:
+                                if g_code in GROUP_PALLET_LIMIT:
+                                    g_box_limit = GROUP_PALLET_LIMIT[g_code]
+                                    # 남은 PLT 공간에 들어갈 박스 수 계산
+                                    add_boxes = int(rem_plt * g_box_limit)
+                                    st.write(f"**{g_code}** : {add_boxes}박스")
+                                else:
+                                    st.write(f"**{g_code}** : 정보 없음")
+                    else:
+                        st.success("✅ 현재 풀 컨테이너 상태입니다.")
+                else:
+                    st.warning("⚠️ 대량 물량으로 인한 별도 배차 협의가 필요합니다.")
+            
+            # 3. 챗봇 연동 버튼
+            if st.button("💬 이 결과로 상세 문의하기", use_container_width=True):
+                query_msg = (f"{selected_group} 자재를 {selected_packing}으로 포장해서 {total_target_weight}kg 보낼 때, "
+                             f"계산된 {calc_boxes:.1f}박스 외에 추가로 주의할 적재 사항이 있어?")
+                st.session_state.pending_query = query_msg
+                st.rerun()
+        else:
+            st.info("자재와 포장재를 선택하시면 표준 규격에 따른 계산이 시작됩니다.")
+
+    elif current_team == "국내영업팀":
+        st.subheader("🚚 국내 최적 운임 비교", divider="rainbow")
+
+        # ── 노선 데이터 로드 ───────────────────────────────────────────────
+        @st.cache_data(ttl=300)
+        def load_route_data():
+            """V3 기준: 시트명='차량 노선 데이터', 도착지='부산(경남권)' 형식"""
+            SHEET = "차량 노선 데이터"
+            # 1순위: 실제 운영 경로
+            search_paths = (
+                glob.glob("data/source_docs/*V3*.xlsx") +
+                glob.glob("data/source_docs/*.xlsx") +
+                glob.glob("/mnt/user-data/uploads/*V3*.xlsx") +
+                glob.glob("/mnt/user-data/uploads/*.xlsx")
+            )
+            df = None
+            for path in search_paths:
+                try:
+                    xf = pd.ExcelFile(path)
+                    # 시트명 자동 탐지 (노선 관련)
+                    route_sheet = next(
+                        (s for s in xf.sheet_names if "노선" in s),
+                        None
+                    )
+                    if route_sheet:
+                        df = pd.read_excel(path, sheet_name=route_sheet).fillna("")
+                        break
+                except Exception:
+                    continue
+            if df is None:
+                return set(), set()
+
+            short_set = set(df[df["거리 기준"] == "단거리"]["도착지"].str.strip().tolist())
+            long_set  = set(df[df["거리 기준"] == "장거리"]["도착지"].str.strip().tolist())
+            return short_set, long_set
+
+        import glob as glob  # 함수 안에서도 사용 가능하도록
+        SHORT_DEST, LONG_DEST = load_route_data()
+
+        def classify_distance(dest: str):
+            """
+            입력 문자열로 단거리/장거리 판별.
+            V3 형식: '부산(경남권)' — 괄호 안 권역명 포함 검색도 지원
+            """
+            dest = dest.strip()
+            # ① 정확히 일치
+            if dest in SHORT_DEST: return "단거리"
+            if dest in LONG_DEST:  return "장거리"
+            # ② 도착지가 '지명(권역)' 형식인 경우: 지명만 추출해서 재비교
+            #    예: 사용자가 '부산' 입력 → DB는 '부산(경남권)'
+            for d in SHORT_DEST:
+                city = d.split("(")[0].strip()
+                if dest == city or dest in d:
+                    return "단거리"
+            for d in LONG_DEST:
+                city = d.split("(")[0].strip()
+                if dest == city or dest in d:
+                    return "장거리"
+            return None
+
+        # ── 입력 폼 ────────────────────────────────────────────────────────
+        with st.container(border=True):
+            destination  = st.text_input("📍 도착 지역", placeholder="예: 서울, 부산, 대구, 광주")
+            total_weight = st.number_input("⚖️ 총 중량 (kg)", min_value=1, value=100)
+
+        # ── 분석 ───────────────────────────────────────────────────────────
+        if destination:
+            dist_type = classify_distance(destination)
+
+            if dist_type is None:
+                st.warning(f"⚠️ **{destination}** 지역이 노선 데이터에 없습니다. 권역 이름(예: 서울권, 경남권)이나 시/군 명칭을 입력해주세요.")
+            else:
+                # ── 단거리 기준: 300kg 이하 → 화물/택배, 초과 → 직송 ──────
+                # ── 장거리 기준: 800kg 이상 → 직송, 미만 → 화물/택배 ────────
+                if dist_type == "단거리":
+                    if total_weight <= 300:
+                        best_option = "화물/택배"
+                        reason = f"단거리({destination}) + {total_weight}kg 이하 → 화물/택배가 유리"
+                        badge_color = "#16a34a"
+                    else:
+                        best_option = "직송"
+                        reason = f"단거리({destination}) + 300kg 초과({total_weight}kg) → 직송이 유리"
+                        badge_color = "#2563eb"
+                else:  # 장거리
+                    if total_weight >= 800:
+                        best_option = "직송"
+                        reason = f"장거리({destination}) + 800kg 이상({total_weight}kg) → 직송이 유리"
+                        badge_color = "#2563eb"
+                    else:
+                        best_option = "화물/택배"
+                        reason = f"장거리({destination}) + 800kg 미만({total_weight}kg) → 화물/택배가 유리"
+                        badge_color = "#16a34a"
+
+                # 결과 배지 (색상 고정 → 다크/라이트 모두 흰 글자로 명확)
+                st.markdown(
+                    f'<div style="background:{badge_color};color:#ffffff;padding:14px 20px;'
+                    f'border-radius:10px;font-size:16px;font-weight:700;margin-bottom:12px;">'
+                    f'🏆 추천: {best_option}</div>',
+                    unsafe_allow_html=True
+                )
+
+                # 거리/중량 기준 카드 — st.info 사용으로 다크모드 자동 대응
+                dist_icon = "🔵" if dist_type == "단거리" else "🟠"
+                st.info(
+                    f"{dist_icon} **거리 구분:** {dist_type} ({destination})  \n"
+                    f"⚖️ **중량:** {total_weight:,} kg  \n"
+                    f"📌 **판단 근거:** {reason}"
+                )
+
+                # 기준표 expander
+                with st.expander("📋 운임 선택 기준 전체 보기"):
+                    st.markdown("""
+| 거리 구분 | 권역 | 중량 기준 | 추천 방법 |
+|-----------|------|-----------|-----------|
+| **단거리** | 영남권(경남/경북), 부산권 | 300 kg 이하 | 화물/택배 |
+| **단거리** | 영남권(경남/경북), 부산권 | 300 kg 초과 | 직송 |
+| **장거리** | 강원권, 경기권, 서울권, 인천권, 전남권, 전북권, 충남권, 충북권 | 800 kg 미만 | 화물/택배 |
+| **장거리** | 강원권, 경기권, 서울권, 인천권, 전남권, 전북권, 충남권, 충북권 | 800 kg 이상 | 직송 |
+
+> 기준 데이터: 용차·배차 차량 노선 데이터
+                    """)
+
+                if st.button("💬 이 운임으로 견적 상담하기", use_container_width=True):
+                    st.session_state.pending_query = (
+                        f"{destination} 지역 {total_weight}kg 기준 운임 비교 결과 "
+                        f"({dist_type}, 추천: {best_option})를 바탕으로 고객 상담용 멘트를 작성해줘."
+                    )
+                    st.rerun()
+    
+   
+    elif current_team == "트랙영업팀":
+        st.subheader("🚜 크롤러 배차 시뮬레이터", divider="rainbow")
+
+        # ── DB(Excel)에서 크롤러 자재 데이터 로드 ──────────────────────────
+        @st.cache_data(ttl=300)
+        def load_crawler_data():
+            """
+            V3 기준:
+              - 파일명: Logibot-Data_기본__V3__1_.xlsx
+              - 시트명: '크롤러 러버트랙 규격 데이터'
+              - 헤더:   1행 (0행은 섹션 제목 '[크롤러 러버트랙 자재 데이터]')
+            파일/시트명이 달라져도 자동 탐지
+            """
+            import glob as _glob
+
+            CRAWLER_SHEET_KEYWORD = "크롤러"
+
+            search_paths = (
+                _glob.glob("data/source_docs/*V3*.xlsx") +
+                _glob.glob("data/source_docs/*.xlsx") +
+                _glob.glob("/mnt/user-data/uploads/*V3*.xlsx") +
+                _glob.glob("/mnt/user-data/uploads/*.xlsx")
+            )
+
+            df = None
+            for path in search_paths:
+                try:
+                    xf = pd.ExcelFile(path)
+                    crawler_sheet = next(
+                        (s for s in xf.sheet_names if CRAWLER_SHEET_KEYWORD in s),
+                        None
+                    )
+                    if not crawler_sheet:
+                        continue
+                    # 0행이 섹션 제목인지 확인해서 header 자동 결정
+                    df_test = pd.read_excel(path, sheet_name=crawler_sheet, header=0, nrows=2)
+                    first_col = str(df_test.columns[0])
+                    # 첫 컬럼이 '[크롤러...]' 같은 섹션 제목이면 header=1
+                    if first_col.startswith("[") or "Unnamed" in first_col:
+                        df = pd.read_excel(path, sheet_name=crawler_sheet, header=1).fillna("")
+                    else:
+                        df = pd.read_excel(path, sheet_name=crawler_sheet, header=0).fillna("")
+                    break
+                except Exception:
+                    continue
+
+            if df is None:
+                return {}
+
+            # 컬럼명 자동 탐지 (이름이 바뀌어도 키워드로 찾기)
+            cols = df.columns.tolist()
+            def find_col(kw):
+                return next((c for c in cols if kw in str(c)), None)
+
+            code_col = find_col("자재코드")
+            name_col = find_col("자재내역")
+            qty_col  = find_col("최대 적재 수량") or find_col("적재 수량")
+            size_col = find_col("사이즈")
+
+            if not code_col:
+                return {}
+
+            data = {}
+            for _, row in df.iterrows():
+                code = str(row.get(code_col, "")).strip()
+                if not code or code in ("nan", ""):
+                    continue
+                size_raw = str(row.get(size_col, "1000*1100")).strip() if size_col else "1000*1100"
+                try:
+                    w_mm, l_mm = [float(x) for x in size_raw.replace("×", "*").split("*")]
+                except Exception:
+                    w_mm, l_mm = 1000.0, 1100.0
+                try:
+                    max_pc = int(float(str(row.get(qty_col, 1)).strip())) if qty_col else 1
+                except Exception:
+                    max_pc = 1
+                data[code] = {
+                    "name"  : str(row.get(name_col, "")).strip() if name_col else "",
+                    "max_pc": max_pc,
+                    "plt_w" : w_mm / 1000,
+                    "plt_l" : l_mm / 1000,
+                }
+            return data
+
+        CRAWLER_DATA = load_crawler_data()
+
+        # ── 입력 폼 ────────────────────────────────────────────────────────
+        with st.container(border=True):
+            t_item_code = st.text_input(
+                "🔖 자재코드", placeholder="예: 6004216"
+            ).strip()
+            t_qty = st.number_input("📦 수량 (PC)", min_value=1, value=1)
+
+        # ── 계산 ───────────────────────────────────────────────────────────
+        if t_item_code:
+            item = CRAWLER_DATA.get(t_item_code)
+            if not item:
+                # 부분 일치 검색
+                partials = [c for c in CRAWLER_DATA if t_item_code in c]
+                if partials:
+                    st.warning(f"정확한 코드를 찾지 못했습니다. 유사 코드: {', '.join(partials[:5])}")
+                else:
+                    st.error("❌ 등록되지 않은 자재코드입니다. DB를 확인해주세요.")
+            else:
+                st.markdown(f"**자재내역:** `{item['name']}`")
+
+                # 파렛트 수 계산
+                max_pc   = item['max_pc']
+                need_plt = t_qty / max_pc
+                need_plt_ceil = -(-t_qty // max_pc)   # 올림 정수
+
+                st.markdown("#### 📊 적재 계산")
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("수량", f"{t_qty} PC")
+                col_b.metric("PLT당 최대", f"{max_pc} PC")
+                col_c.metric("필요 파렛트", f"{need_plt_ceil} PLT")
+                st.caption(
+                    f"파렛트 사이즈: {int(item['plt_w']*1000)} × {int(item['plt_l']*1000)} mm  |  "
+                    f"계산: {t_qty} ÷ {max_pc} = {need_plt:.2f} → 올림 {need_plt_ceil} PLT"
+                )
+
+                # 차량 추천
+                best_truck = get_db_transport_advice(need_plt_ceil)
+                with st.expander("🚚 최적 배차 추천", expanded=True):
+                    if best_truck:
+                        st.success(f"**추천 차량:** {best_truck['name']}")
+                        st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
+                        st.write(f"📦 **최대 적재:** {best_truck['max_plt']} PLT")
+                        load_ratio = (need_plt_ceil / best_truck['max_plt']) * 100
+                        st.progress(min(load_ratio / 100, 1.0))
+                        st.caption(f"적재율: {load_ratio:.1f}%")
+                    else:
+                        st.warning("⚠️ 적합한 차량이 없습니다. 물류팀에 직접 문의하세요.")
+
+                if st.button("💬 이 배차 정보로 문의하기", use_container_width=True):
+                    truck_name = best_truck['name'] if best_truck else "없음"
+                    st.session_state.pending_query = (
+                        f"자재코드 {t_item_code}({item['name']}), 수량 {t_qty}PC → "
+                        f"{need_plt_ceil}PLT 기준 배차 추천 결과({truck_name})를 확인했습니다. "
+                        f"실제 배차 가능 여부와 주의사항을 알려줘."
+                    )
+                    st.rerun()
+        else:
+            st.info("자재코드와 수량을 입력하시면 DB 기반으로 최적 차량을 분석합니다.")
+                       
+st.title("📦 DRB LOGIBOT-AI")
+curr_conv = st.session_state.conversations[st.session_state.current_id]
+
+# --- 추천 질문 표시 (첫 메시지(인사말)만 있을 때) ---
+current_team = st.session_state.get("selected_team", "국내영업팀")
+suggestions = TEAM_SUGGESTIONS.get(current_team, [])
+
+if len(curr_conv["messages"]) == 1 and st.session_state.show_suggestions:
+    for row in range(3):
+        col1, col2 = st.columns(2)
+        with col1:
+            idx1 = row * 2
+            if idx1 < len(suggestions):
+                if st.button(f"{suggestions[idx1]}", key=f"sugg_{current_team}_{idx1}", use_container_width=True):
+                    st.session_state.pending_query = suggestions[idx1]
+                    st.rerun()
+        with col2:
+            idx2 = row * 2 + 1
+            if idx2 < len(suggestions):
+                if st.button(f"{suggestions[idx2]}", key=f"sugg_{current_team}_{idx2}", use_container_width=True):
+                    st.session_state.pending_query = suggestions[idx2]
+                    st.rerun()
+
+# 메시지 표시
+for idx, msg in enumerate(curr_conv["messages"]):
+    clean_content = re.sub(r'\s?\d\.\d{3}\s?', '', msg["content"]).strip()
+
+    if msg["role"] == "user":
+        # ✅ 사용자 질문 버블
+        with st.container():
+            st.markdown(f'<div class="chat-bubble user">{clean_content}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="message-timestamp" style="text-align:right;">{msg["timestamp"][-8:-3]}</div>', unsafe_allow_html=True)
+
+    elif msg["role"] == "assistant":
+        body_html, _ = format_answer_display(clean_content, msg.get("has_table", False))
+        
+        with st.container():
+            st.markdown(f'<div class="chat-bubble assistant">{body_html}</div>', unsafe_allow_html=True)
+
+        st.markdown(f'<div class="message-timestamp">{msg["timestamp"][-8:-3]}</div>', unsafe_allow_html=True)
+        
+        # 피드백 및 복사 버튼 (첫 어시스턴트 인사말 제외)
+        if idx > 0:
+            c1, c2, c3, c4, _ = st.columns([0.5, 0.5, 1.2, 1.5, 3])
+            with c1:
+                if st.button("👍", key=f"up_{idx}"):
+                    if (st.session_state.current_id, idx) not in st.session_state.feedback_done:
+                        submit_feedback(
+                            curr_conv["messages"][idx-1]["content"], 
+                            1.0, 
+                            msg["content"], 
+                            []
+                        )
+                        st.session_state.feedback_done.add((st.session_state.current_id, idx))
+                        st.toast("긍정적인 피드백 감사합니다!")
+            with c2:
+                if st.button("👎", key=f"down_{idx}"):
+                    if (st.session_state.current_id, idx) not in st.session_state.feedback_done:
+                        last_user_q = ""
+                        for prev in reversed(curr_conv["messages"][:idx]):
+                            if prev["role"] == "user":
+                                last_user_q = prev["content"]
+                                break
+                        show_bad_feedback_popup(idx, last_user_q, msg["content"])
+            with c3:
+                raw_text = re.sub('<[^<]+?>', '', msg["content"])
+                st.download_button("📋", data=raw_text, file_name="answer.txt", key=f"cp_{idx}")
+            with c4:
+                sources = msg.get("sources", [])
+                btn_label = f"📎 참고문서 ({len(sources)})" if sources else "📎 참고문서"
+                if st.button(btn_label, key=f"src_{idx}", disabled=not sources):
+                    last_user_msg = ""
+                    # 해당 답변 직전의 사용자 질문 찾기
+                    for prev in reversed(curr_conv["messages"][:idx]):
+                        if prev["role"] == "user":
+                            last_user_msg = prev["content"]
+                            break
+                    show_source_popup(sources, last_user_msg)
+        
+# --- 대기 중인 질문 처리 ---
+if st.session_state.pending_query and not st.session_state.is_generating:
+    query = st.session_state.pending_query
+    st.session_state.pending_query = None
+    process_user_query(query)
+
+# --- 입력 처리 ---
+input_placeholder = (
+    "⏳ 답변 생성 중... 입력하면 완료 후 자동 처리됩니다"
+    if st.session_state.is_generating
+    else "물류 업무에 대해 질문하세요"
+)
+if prompt := st.chat_input(input_placeholder):
+    user_query = re.sub(r'\s?\d\.\d{3}\s?', '', prompt).strip()
+    if st.session_state.is_generating:
+        # 생성 중이면 대기열에 저장
+        st.session_state.queued_query = user_query
+        st.toast("⏳ 이전 답변 완료 후 자동으로 처리됩니다.", icon="⏳")
+    else:
+        process_user_query(user_query)

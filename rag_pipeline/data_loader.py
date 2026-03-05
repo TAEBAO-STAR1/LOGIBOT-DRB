@@ -1,338 +1,418 @@
 import os
 import sys
+import re
+import hashlib
+import logging
+from typing import List, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient, models
-from langchain_community.document_loaders import PyPDFDirectoryLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_ollama import OllamaEmbeddings
-from langchain_community.vectorstores import Qdrant
 from langchain_core.documents import Document
+from langchain_ollama import OllamaEmbeddings
 import pandas as pd
+from tqdm import tqdm
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# 환경 변수 로드
 load_dotenv()
 
-# 환경 변수 정의 및 필수 변수 검증
-MANDATORY_ENV_VARS = [
-    "COLLECTION_NAME", "QDRANT_HOST", "QDRANT_PORT",
-    "OLLAMA_EMBEDDING_MODEL", "OLLAMA_HOST"
-]
+MANDATORY_ENV_VARS = ["COLLECTION_NAME", "QDRANT_HOST", "QDRANT_PORT",
+                      "OLLAMA_EMBEDDING_MODEL", "OLLAMA_HOST"]
 
-# 환경 변수 검증 함수
 def validate_env_vars():
-    missing_vars = [var for var in MANDATORY_ENV_VARS if not os.getenv(var)]
-    if missing_vars:
-        print(f"Error: The following environment variables are missing in .env: {', '.join(missing_vars)}")
+    missing = [v for v in MANDATORY_ENV_VARS if not os.getenv(v)]
+    if missing:
+        logger.error(f"필수 환경 변수 누락: {', '.join(missing)}")
         sys.exit(1)
 
-# 검증 실행
 validate_env_vars()
 
-# 환경 변수 로드
-COLLECTION_NAME = os.getenv("COLLECTION_NAME")
-QDRANT_HOST = os.getenv("QDRANT_HOST")
-# QDRANT_PORT는 문자열로 로드되므로 정수 변환을 시도합니다.
-try:
-    QDRANT_PORT = int(os.getenv("QDRANT_PORT"))
-except (TypeError, ValueError):
-    print("Error: QDRANT_PORT must be a valid integer.")
-    sys.exit(1)
+COLLECTION_NAME        = os.getenv("COLLECTION_NAME")
+QDRANT_HOST            = os.getenv("QDRANT_HOST")
+QDRANT_PORT            = int(os.getenv("QDRANT_PORT"))
+OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL")
+OLLAMA_HOST            = os.getenv("OLLAMA_HOST")
+MAX_WORKERS            = int(os.getenv("MAX_WORKERS", "4"))
+VECTOR_BATCH_SIZE      = int(os.getenv("VECTOR_BATCH_SIZE", "128"))
 
-OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL") 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST")
+# ── 시트별 청킹 전략 ──────────────────────────────────────────────────────────
+# WHOLE : 시트 전체 → 1개 문서 (수식/규칙/소규모 테이블)
+# QA    : 행(질문-답변) 단위로 각 1개 문서
+# GROUP : 특정 컬럼 기준 그룹핑
+# ROW   : 자재코드 기반 행 단위 문서
+SHEET_STRATEGY: Dict[str, str] = {
+    "수출 포장량 산출 수식"      : "WHOLE",
+    "포장량 산출 데이터"         : "WHOLE",
+    "차량 데이터"                : "WHOLE",
+    "컨베어벨트 직경 산출 수식"  : "WHOLE",
+    "파렛트, 박스 데이터"        : "WHOLE",
+    "물류팀 운영 규칙"           : "QA",
+    "조직 및 담당자 정보"        : "GROUP",
+    "컨베어벨트 규격 데이터"     : "ROW",
+    "주름혹벨트 우든박스 사이즈" : "ROW",
+    "크롤러 러버트랙"            : "ROW",
+    "용차, 배차 차량 노선 데이터": "GROUP",
+}
+
+# ── 유틸 ─────────────────────────────────────────────────────────────────────
+def clean_val(v) -> str:
+    s = str(v).strip()
+    return "" if s in ("nan", "None", "NaN", "", "0") else s
+
+def make_hash(text: str, salt: str = "") -> str:
+    return hashlib.md5(f"{text}{salt}".encode()).hexdigest()
+
+def extract_material_code(text: str) -> str:
+    for pat in [r'자재코드[:\s]*(\d{7})', r'\b(\d{7})\b']:
+        m = re.search(pat, text)
+        if m:
+            return m.group(1)
+    return ""
 
 
-def load_excel_documents(file_path: str) -> list[Document]:
-    """
-    Excel 파일을 로드하여 Document 객체 리스트로 변환합니다.
-    각 시트를 별도의 문서로 처리하며, 행 단위로 텍스트를 생성합니다.
-    
-    Args:
-        file_path: Excel 파일 경로
-    
-    Returns:
-        Document 객체 리스트
-    """
-    documents = []
-    file_name = os.path.basename(file_path)
-    
-    try:
-        # Excel 파일의 모든 시트 읽기
-        excel_file = pd.ExcelFile(file_path)
-        
-        for sheet_name in excel_file.sheet_names:
-            print(f"  Processing sheet: {sheet_name}")
-            
-            # 시트를 DataFrame으로 읽기
-            df = pd.read_excel(file_path, sheet_name=sheet_name)
-            
-            # 빈 DataFrame 체크
-            if df.empty:
-                print(f"  Warning: Sheet '{sheet_name}' is empty, skipping.")
+# ── WHOLE : 시트 전체를 구조화 텍스트 1개 문서로 ────────────────────────────
+def sheet_to_whole_doc(df: pd.DataFrame, sheet_name: str, file_name: str) -> List[Document]:
+    lines = [f"[{sheet_name}]"]
+    for _, row in df.iterrows():
+        parts = [clean_val(v) for v in row.values if clean_val(v)]
+        if parts:
+            lines.append(" | ".join(parts))
+    content = "\n".join(lines).strip()
+    if len(content) < 30:
+        return []
+    return [Document(
+        page_content=content,
+        metadata={"source": file_name, "file_name": file_name,
+                  "sheet_name": sheet_name, "strategy": "WHOLE", "file_type": "excel"}
+    )]
+
+
+# ── QA : 질문-답변 쌍 각 1개 문서 ──────────────────────────────────────────
+def sheet_to_qa_docs(df: pd.DataFrame, sheet_name: str, file_name: str) -> List[Document]:
+    docs = []
+    seen = set()
+    SKIP = {"[물류팀 운영 규칙]", "구분", ""}
+
+    for _, row in df.iterrows():
+        vals = [clean_val(v) for v in row.values if clean_val(v)]
+        if not vals:
+            continue
+        question = vals[0] if len(vals) > 0 else ""
+        answer   = vals[1] if len(vals) > 1 else ""
+
+        if question in SKIP:
+            continue
+
+        content = f"[{sheet_name}]\nQ: {question}\nA: {answer}" if answer \
+                  else f"[{sheet_name}]\n{question}"
+
+        h = make_hash(content)
+        if h in seen:
+            continue
+        seen.add(h)
+
+        docs.append(Document(
+            page_content=content,
+            metadata={"source": file_name, "file_name": file_name,
+                      "sheet_name": sheet_name, "strategy": "QA", "file_type": "excel"}
+        ))
+    return docs
+
+
+# ── GROUP : 컬럼 기준 그룹핑 문서 ───────────────────────────────────────────
+def sheet_to_group_docs(df: pd.DataFrame, sheet_name: str, file_name: str) -> List[Document]:
+    # 첫 데이터 행이 헤더인지 확인 후 컬럼 재설정
+    first_row = df.iloc[0].astype(str)
+    if first_row.str.contains("구분|출발지|성명", na=False).any():
+        df.columns = [clean_val(v) if clean_val(v) else f"col_{i}"
+                      for i, v in enumerate(df.iloc[0])]
+        df = df.iloc[1:].reset_index(drop=True)
+
+    df.columns = [str(c).strip() if not str(c).startswith("Unnamed") else f"col_{i}"
+                  for i, c in enumerate(df.columns)]
+    df = df.fillna("")
+
+    group_col = next((c for c in ["구분", "거리 기준", "col_1"] if c in df.columns), None)
+    if not group_col:
+        return sheet_to_whole_doc(df, sheet_name, file_name)
+
+    docs = []
+    seen = set()
+    for group_name, group_df in df.groupby(group_col):
+        gname = clean_val(group_name)
+        if not gname:
+            continue
+
+        lines = [f"[{sheet_name} - {gname}]"]
+        for _, row in group_df.iterrows():
+            parts = [f"{col}: {clean_val(row.get(col,''))}"
+                     for col in group_df.columns
+                     if col != group_col and clean_val(row.get(col, ""))]
+            if parts:
+                lines.append("  " + " | ".join(parts))
+
+        content = "\n".join(lines).strip()
+        h = make_hash(content)
+        if h in seen or len(content) < 20:
+            continue
+        seen.add(h)
+
+        docs.append(Document(
+            page_content=content,
+            metadata={"source": file_name, "file_name": file_name, "sheet_name": sheet_name,
+                      "group": gname, "strategy": "GROUP", "file_type": "excel"}
+        ))
+    return docs
+
+
+# ── ROW : 자재코드 기반 행 단위 문서 ────────────────────────────────────────
+PRIORITY_COLS = ["자재코드", "자재내역", "자재 그룹",
+                 "주름혹 컨베어벨트 자재코드", "주름혹 컨베어벨트 자재내역",
+                 "크롤러 러버트랙 자재코드", "크롤러 러버트랙 자재내역"]
+
+def sheet_to_row_docs(df: pd.DataFrame, sheet_name: str, file_name: str) -> List[Document]:
+    docs = []
+    seen = set()
+    columns = df.columns.tolist()
+
+    for idx, row in df.iterrows():
+        parts = []
+        for col in PRIORITY_COLS:
+            if col in columns:
+                v = clean_val(row.get(col, ""))
+                if v:
+                    parts.append(f"{col}: {v}")
+        for col in columns:
+            if col in PRIORITY_COLS:
                 continue
-            
-            # NaN 값을 빈 문자열로 대체
-            df = df.fillna('')
-            
-            # 전체 시트를 하나의 텍스트로 변환 (테이블 형식 유지)
-            sheet_text_parts = []
-            
-            # 컬럼 헤더 추가
-            headers = " | ".join(str(col) for col in df.columns)
-            sheet_text_parts.append(f"Sheet: {sheet_name}\n")
-            sheet_text_parts.append(f"Columns: {headers}\n")
-            sheet_text_parts.append("-" * 80 + "\n")
-            
-            # 각 행을 텍스트로 변환
-            for idx, row in df.iterrows():
-                row_text = " | ".join(
-                    f"{col}: {str(val).strip()}" 
-                    for col, val in zip(df.columns, row) 
-                    if str(val).strip()
-                )
-                if row_text:  # 빈 행 제외
-                    sheet_text_parts.append(f"Row {idx + 1}: {row_text}\n")
-            
-            sheet_content = "".join(sheet_text_parts)
-            
-            # 최소 콘텐츠 길이 체크
-            if len(sheet_content.strip()) > 50:  # 최소 50자 이상만 처리
-                doc = Document(
-                    page_content=sheet_content,
-                    metadata={
-                        "source": file_path,
-                        "file_name": file_name,
-                        "sheet_name": sheet_name,
-                        "row_count": len(df),
-                        "column_count": len(df.columns),
-                        "file_type": "excel"
-                    }
-                )
-                documents.append(doc)
-                print(f"  Success: Created document from sheet '{sheet_name}' ({len(df)} rows, {len(df.columns)} columns)")
-            else:
-                print(f"  Warning: Sheet '{sheet_name}' has insufficient content, skipping.")
-        
-        print(f"Success: Loaded {len(documents)} documents from {file_name}")
-        
+            v = clean_val(row.get(col, ""))
+            if v:
+                parts.append(f"{col}: {v}")
+
+        if not parts:
+            continue
+
+        content = f"[{sheet_name}]\n" + " | ".join(parts)
+        if len(content.strip()) < 20:
+            continue
+
+        h = make_hash(content)
+        if h in seen:
+            continue
+        seen.add(h)
+
+        material_code = ""
+        for col in PRIORITY_COLS:
+            if "코드" in col and col in row.index:
+                v = clean_val(row.get(col, ""))
+                if re.match(r'^\d{7}$', v):
+                    material_code = v
+                    break
+        if not material_code:
+            material_code = extract_material_code(content)
+
+        metadata = {"source": file_name, "file_name": file_name, "sheet_name": sheet_name,
+                    "row_number": int(idx) + 1, "strategy": "ROW", "file_type": "excel",
+                    "has_material_code": bool(material_code)}
+        if material_code:
+            metadata["material_code"] = material_code
+
+        docs.append(Document(page_content=content, metadata=metadata))
+    return docs
+
+
+# ── Excel 로더 ────────────────────────────────────────────────────────────────
+def load_excel(file_path: str) -> List[Document]:
+    file_name = os.path.basename(file_path)
+    documents = []
+    try:
+        excel_file = pd.ExcelFile(file_path)
+        logger.info(f"📊 Excel: {file_name} ({len(excel_file.sheet_names)}개 시트)")
+
+        for sheet_name in excel_file.sheet_names:
+            df = pd.read_excel(file_path, sheet_name=sheet_name).fillna("")
+            strategy = SHEET_STRATEGY.get(sheet_name, "ROW")
+            logger.info(f"  [{sheet_name}] 전략:{strategy} ({len(df)}행)")
+
+            fn = {"WHOLE": sheet_to_whole_doc, "QA": sheet_to_qa_docs,
+                  "GROUP": sheet_to_group_docs, "ROW": sheet_to_row_docs}[strategy]
+            docs = fn(df, sheet_name, file_name)
+            logger.info(f"    → {len(docs)}개 문서")
+            documents.extend(docs)
+
     except Exception as e:
-        print(f"Error loading Excel file {file_name}: {e}")
-    
+        logger.error(f"❌ Excel 로드 실패: {file_name} / {e}")
     return documents
 
 
-def load_and_split_documents(data_path: str = "data/source_docs") -> list[Document]:
-    """
-    지정된 경로의 PDF 및 Excel 문서를 로드하고 청크로 분할합니다.
-    Args:
-        data_path: 문서가 포함된 디렉토리 경로.
-    Returns:
-        분할된 Document 객체 리스트.
-    """
-    print(f"\n{'='*80}")
-    print(f"Loading documents from {data_path}...")
-    print(f"{'='*80}\n")
-    documents = []
-    
-    # 1. PDF 문서 로드
-    print("Loading PDF documents...")
+# ── PDF 로더 ─────────────────────────────────────────────────────────────────
+def load_pdf(file_path: str) -> List[Document]:
+    file_name = os.path.basename(file_path)
     try:
-        pdf_loader = PyPDFDirectoryLoader(data_path)
-        pdf_docs = pdf_loader.load()
-        documents.extend(pdf_docs)
-        print(f"Success: Loaded {len(pdf_docs)} PDF documents.\n")
-    except Exception as e:
-        print(f"Error during PDF document loading: {e}\n")
+        from langchain_community.document_loaders import PyPDFLoader
+        from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-    # 2. Excel 문서 (.xlsx, .xls) 로드
-    print("Loading Excel documents...")
-    
-    # 디버깅: 디렉토리 내 모든 파일 출력
-    try:
-        all_files = os.listdir(data_path)
-        print(f"Files in directory '{data_path}':")
-        for f in all_files:
-            file_path = os.path.join(data_path, f)
-            if os.path.isfile(file_path):
-                file_size = os.path.getsize(file_path)
-                print(f"  - {f} ({file_size} bytes)")
-            else:
-                print(f"  - {f} (directory)")
-        print()
-    except Exception as e:
-        print(f"Error listing directory: {e}\n")
-    
-    # Excel 파일 필터링 (대소문자 무시, 임시 파일 제외)
-    excel_files = []
-    for f in os.listdir(data_path):
-        if f.lower().endswith(('.xlsx', '.xls')) and not f.startswith('~$'):
-            excel_files.append(f)
-    
-    if excel_files:
-        print(f"Found {len(excel_files)} Excel file(s):\n")
-        excel_doc_count = 0
-        for file_name in excel_files:
-            print(f"Processing: {file_name}")
-            file_path = os.path.join(data_path, file_name)
-            excel_docs = load_excel_documents(file_path)
-            documents.extend(excel_docs)
-            excel_doc_count += len(excel_docs)
-            print()
-        
-        print(f"Success: Total Excel documents loaded: {excel_doc_count}\n")
-    else:
-        print("No Excel files found.\n")
+        pages = PyPDFLoader(file_path).load()
+        if not pages:
+            return []
 
-    if not documents:
-        print("Warning: No PDF or Excel documents were found to process.")
+        # 짧은 페이지 병합 (300자 미만)
+        merged, buf = [], ""
+        for page in pages:
+            text = page.page_content.strip()
+            if not text:
+                continue
+            buf += "\n" + text
+            if len(buf) >= 300:
+                merged.append(Document(
+                    page_content=buf.strip(),
+                    metadata={**page.metadata, "file_name": file_name, "file_type": "pdf"}
+                ))
+                buf = ""
+        if buf.strip():
+            merged.append(Document(
+                page_content=buf.strip(),
+                metadata={**pages[-1].metadata, "file_name": file_name, "file_type": "pdf"}
+            ))
+
+        chunks = RecursiveCharacterTextSplitter(
+            chunk_size=800, chunk_overlap=150,
+            separators=["\n\n", "\n", ". ", " ", ""]
+        ).split_documents(merged)
+
+        logger.info(f"  ✅ PDF: {file_name} → {len(chunks)}청크")
+        return chunks
+    except Exception as e:
+        logger.error(f"❌ PDF 실패: {file_name} / {e}")
         return []
 
-    print(f"{'='*80}")
-    print(f"Total documents loaded: {len(documents)}")
-    print(f"{'='*80}\n")
 
-    # 문서 내용 검증
-    print("Validating document contents...")
-    valid_documents = []
-    for i, doc in enumerate(documents):
-        if doc.page_content and len(doc.page_content.strip()) > 20:
-            valid_documents.append(doc)
-        else:
-            print(f"Warning: Skipping document {i+1}: insufficient content")
-    
-    print(f"Valid documents after filtering: {len(valid_documents)}\n")
+# ── 전체 문서 로드 ────────────────────────────────────────────────────────────
+def load_and_split_documents(data_path: str = "data/source_docs") -> List[Document]:
+    logger.info(f"\n{'='*60}\n📁 문서 로딩: {data_path}\n{'='*60}\n")
 
-    # 재귀적 문자 분할기를 사용하여 문서를 청크로 나눕니다.
-    print("Splitting documents into chunks...")
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len,
-        is_separator_regex=False,
-    )
-    chunks = text_splitter.split_documents(valid_documents)
-    
-    print(f"Success: Total chunks created: {len(chunks)}\n")
-    
-    # 청크 샘플 출력 (디버깅용)
-    if chunks:
-        print("Sample chunk preview:")
-        print("-" * 80)
-        print(f"Content: {chunks[0].page_content[:200]}...")
-        print(f"Metadata: {chunks[0].metadata}")
-        print("-" * 80 + "\n")
-    
-    return chunks
+    pdf_files, excel_files = [], []
+    try:
+        for f in os.listdir(data_path):
+            fp = os.path.join(data_path, f)
+            if not os.path.isfile(fp):
+                continue
+            if f.lower().endswith(".pdf"):
+                pdf_files.append(fp)
+            elif f.lower().endswith((".xlsx", ".xls")) and not f.startswith("~$"):
+                excel_files.append(fp)
+    except Exception as e:
+        logger.error(f"디렉토리 스캔 실패: {e}")
+        return []
+
+    logger.info(f"PDF {len(pdf_files)}개 | Excel {len(excel_files)}개\n")
+    documents = []
+
+    if pdf_files:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+            for result in as_completed({ex.submit(load_pdf, fp): fp for fp in pdf_files}):
+                documents.extend(result.result())
+
+    for fp in excel_files:
+        documents.extend(load_excel(fp))
+
+    valid = [d for d in documents if d.page_content and len(d.page_content.strip()) > 15]
+
+    logger.info(f"\n{'='*60}\n✅ 총 {len(valid)}개 유효 문서")
+    sc = {}
+    for d in valid:
+        s = d.metadata.get("strategy", d.metadata.get("file_type", "?"))
+        sc[s] = sc.get(s, 0) + 1
+    for s, c in sorted(sc.items()):
+        logger.info(f"  {s}: {c}개")
+    logger.info(f"{'='*60}\n")
+    return valid
 
 
-def index_documents_to_qdrant(chunks: list[Document]):
-    """
-    분할된 청크를 임베딩하여 Qdrant 벡터 저장소에 적재합니다.
-    """
+# ── Qdrant 인덱싱 ─────────────────────────────────────────────────────────────
+def batch_embed_and_index(chunks, embeddings, client, collection_name, batch_size=64):
+    total = 0
+    with tqdm(total=len(chunks), desc="인덱싱", unit="doc") as pbar:
+        for start in range(0, len(chunks), batch_size):
+            batch = chunks[start:start + batch_size]
+            try:
+                vectors = embeddings.embed_documents([c.page_content for c in batch])
+                points = [
+                    models.PointStruct(
+                        id=make_hash(c.page_content, str(start + i)),
+                        vector=v,
+                        payload={"page_content": c.page_content, "metadata": c.metadata,
+                                 **({"material_code": c.metadata["material_code"]}
+                                    if c.metadata.get("material_code") else {})}
+                    )
+                    for i, (c, v) in enumerate(zip(batch, vectors))
+                ]
+                client.upsert(collection_name=collection_name, points=points)
+                total += len(points)
+                pbar.update(len(batch))
+            except Exception as e:
+                logger.error(f"배치 실패(start={start}): {e}")
+                for j, chunk in enumerate(batch):
+                    try:
+                        vec = embeddings.embed_query(chunk.page_content)
+                        client.upsert(collection_name=collection_name, points=[
+                            models.PointStruct(
+                                id=make_hash(chunk.page_content, str(start + j)),
+                                vector=vec,
+                                payload={"page_content": chunk.page_content,
+                                         "metadata": chunk.metadata}
+                            )
+                        ])
+                        total += 1
+                    except Exception as ie:
+                        logger.error(f"  개별 실패: {ie}")
+                pbar.update(len(batch))
+    logger.info(f"✅ 인덱싱 완료: {total}개")
+
+
+def index_documents_to_qdrant(chunks: List[Document]) -> None:
     if not chunks:
-        print("No chunks to index. Exiting indexing process.")
+        logger.warning("청크 없음")
         return
 
-    qdrant_url = f"http://{QDRANT_HOST}:{QDRANT_PORT}"
-    print(f"{'='*80}")
-    print(f"Initializing Qdrant client at {qdrant_url}")
-    print(f"{'='*80}\n")
-    
-    # Qdrant 클라이언트 초기화
     client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-    
-    # Ollama 임베딩 모델 초기화 (Ollama 서버에서 임베딩 수행)
-    print(f"Initializing embedding model: {OLLAMA_EMBEDDING_MODEL}")
     embeddings = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_HOST)
 
-    # 임베딩 차원 동적 확인
-    print("Detecting embedding vector dimensions...")
     try:
-        sample_vector = embeddings.embed_query("This is a test query to get the dimension.")
-        vector_size = len(sample_vector)
-        print(f"Success: Detected vector size for '{OLLAMA_EMBEDDING_MODEL}': {vector_size}\n")
+        sample = embeddings.embed_query("테스트")
+        vector_size = len(sample)
     except Exception as e:
-        print(f"Error getting embedding dimension from Ollama. Check Ollama server and model name. Error: {e}")
+        logger.error(f"임베딩 오류: {e}")
         vector_size = 768
-        print(f"Using default vector size: {vector_size}\n")
 
-    # Qdrant 컬렉션 존재 여부 확인 및 생성/재생성
-    print(f"Setting up collection: {COLLECTION_NAME}")
-    collections = client.get_collections().collections
-    if COLLECTION_NAME in [c.name for c in collections]:
-        print(f"Collection '{COLLECTION_NAME}' already exists. Recreating it for a fresh index...")
-        client.recreate_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=models.VectorParams(
-                size=vector_size,
-                distance=models.Distance.COSINE
-            )
-        )
-    else:
-        print(f"Creating new collection: '{COLLECTION_NAME}'...")
-        client.recreate_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=models.VectorParams(
-                size=vector_size,
-                distance=models.Distance.COSINE
-            )
-        )
-    print("Success: Collection ready\n")
+    existing = [c.name for c in client.get_collections().collections]
+    if COLLECTION_NAME in existing:
+        client.delete_collection(COLLECTION_NAME)
 
-    # 청크를 Qdrant에 저장
-    print(f"{'='*80}")
-    print(f"Indexing {len(chunks)} chunks into Qdrant...")
-    print(f"{'='*80}\n")
-    
-    try:
-        # 파일 타입별 통계
-        file_types = {}
-        for chunk in chunks:
-            ftype = chunk.metadata.get('file_type', 'pdf')
-            file_types[ftype] = file_types.get(ftype, 0) + 1
-        
-        print("Chunks by file type:")
-        for ftype, count in file_types.items():
-            print(f"  - {ftype.upper()}: {count} chunks")
-        print()
-        
-        Qdrant.from_documents(
-            chunks,
-            embeddings,
-            collection_name=COLLECTION_NAME,
-            url=qdrant_url,
-            force_recreate=False
-        )
-        print(f"\n{'='*80}")
-        print("Success: Document indexing complete!")
-        print(f"{'='*80}\n")
-    except Exception as e:
-        print(f"Error during Qdrant indexing: {e}")
+    client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config=models.VectorParams(size=vector_size, distance=models.Distance.COSINE),
+        optimizers_config=models.OptimizersConfigDiff(indexing_threshold=500)
+    )
+
+    batch_embed_and_index(chunks, embeddings, client, COLLECTION_NAME, VECTOR_BATCH_SIZE)
+
+    info = client.get_collection(COLLECTION_NAME)
+    logger.info(f"\n📈 최종 벡터 수: {info.points_count}개")
 
 
 if __name__ == "__main__":
     DATA_FOLDER = "data/source_docs"
-    
-    # 데이터 폴더가 없으면 생성
-    if not os.path.exists(DATA_FOLDER):
-        os.makedirs(DATA_FOLDER, exist_ok=True)
-        
-    # PDF 또는 Excel 파일이 있는지 확인
-    has_files = any(
-        fname.lower().endswith(('.pdf', '.xlsx', '.xls')) 
-        for fname in os.listdir(DATA_FOLDER)
-    )
-    
-    if not has_files:
-        print("=" * 80)
-        print(f"INFO: Please place your PDF and/or Excel documents into the '{DATA_FOLDER}' folder.")
-        print("Run the script again after adding your files.")
-        print("=" * 80)
+    os.makedirs(DATA_FOLDER, exist_ok=True)
+    files = [f for f in os.listdir(DATA_FOLDER)
+             if f.lower().endswith((".pdf", ".xlsx", ".xls"))]
+    if not files:
+        logger.warning(f"'{DATA_FOLDER}'에 PDF/Excel 파일을 넣어주세요.")
     else:
-        # 문서 로드 및 벡터화 시작
-        logistics_chunks = load_and_split_documents(data_path=DATA_FOLDER)
-        if logistics_chunks:
-            index_documents_to_qdrant(logistics_chunks)
+        chunks = load_and_split_documents(DATA_FOLDER)
+        if chunks:
+            index_documents_to_qdrant(chunks)
         else:
-            print("No valid chunks were created. Please check your source documents.")
+            logger.error("유효 청크 없음")
