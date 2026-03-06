@@ -270,7 +270,7 @@ TEAM_SUGGESTIONS = {
         "주문 마감 시간",
         "내수용 PLT 규격 리스트",
         "부산 지입기사 정보",
-        "추가 운임이 발생하는 항목",
+        "물류팀 주문 가능 시간대",
         "국내 담당자에 대한 정보"
     ],
     "해외영업팀": [
@@ -776,91 +776,256 @@ with st.sidebar:
             st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")      
         st.markdown("---")           
         
-    # 1. 표준 데이터 매핑 (딕셔너리 구조)
-    # { '포장재명': 박스당 순중량(kg) }
-    PACKING_WEIGHTS = {
-        "제품-600박스": 15.0, "제품-650박스": 18.0, "제품-1090박스": 25.0,
-        "제품-세미박스": 10.0, "제품-마대": 30.0, "슬리브-600박스": 12.0,
-        "슬리브-650박스": 14.0, "슬리브-세미박스": 8.0
-    }
-    # 팔레트당 적재 박스 수 (자재그룹별 예시)
-    GROUP_PALLET_LIMIT = {
-        "B01": 20, "B02": 20, "N18": 20, "N19": 20
-    }
-    
+    # ── 포장량 DB 로드 (하드코딩 완전 제거) ─────────────────────────────
+    @st.cache_data(ttl=300)
+    def load_packing_db():
+        """
+        '포장량 산출 데이터' 시트 → {포장재키: {자재그룹: 중량kg}} 딕셔너리 반환
+        예) {"제품-650박스": {"B01": 27.7, "B02": 25.0, "N18": 25.0, "N19": 31.0}, ...}
+        """
+        import glob as _glob, re as _re
+
+        search_paths = (
+            _glob.glob("data/source_docs/*V4*.xlsx") +
+            _glob.glob("data/source_docs/*V3*.xlsx") +
+            _glob.glob("data/source_docs/*.xlsx") +
+            _glob.glob("/mnt/user-data/uploads/*V4*.xlsx") +
+            _glob.glob("/mnt/user-data/uploads/*.xlsx")
+        )
+
+        df = None
+        for path in search_paths:
+            try:
+                xf = pd.ExcelFile(path)
+                sheet = next((s for s in xf.sheet_names if "포장량 산출 데이터" in s), None)
+                if sheet:
+                    df = pd.read_excel(path, sheet_name=sheet, header=None).fillna("")
+                    break
+            except Exception:
+                continue
+
+        if df is None:
+            return {}, [], []
+
+        # 헤더 행(index=2)에서 자재그룹 컬럼 위치 탐지
+        header_row = df.iloc[2].tolist()
+        group_cols = {}
+        for ci, cell in enumerate(header_row):
+            m = _re.search(r'\b(B01|B02|N18|N19)\b', str(cell))
+            if m:
+                group_cols[m.group(1)] = ci
+
+        # 포장재 행 설명 → 키 매핑 (순서 중요: 1090 → 650 순으로 체크)
+        PACKING_KEY_MAP = [
+            (r'제품.*?1090',   "제품-1090박스"),
+            (r'제품.*?650',    "제품-650박스"),
+            (r'제품.*?세미',   "제품-세미박스"),
+            (r'제품.*?마대',   "제품-마대"),
+            (r'제품.*?600',    "제품-600박스"),
+            (r'슬리브.*?650',  "슬리브-650박스"),
+            (r'슬리브.*?세미', "슬리브-세미박스"),
+            (r'슬리브.*?600',  "슬리브-600박스"),
+        ]
+
+        packing_table = {}
+        for row_idx in range(3, len(df)):
+            desc = str(df.iloc[row_idx, 1])
+            if not desc.strip():
+                continue
+            for pattern, key in PACKING_KEY_MAP:
+                if _re.search(pattern, desc):
+                    grp_weights = {}
+                    for grp, ci in group_cols.items():
+                        cell = str(df.iloc[row_idx, ci])
+                        m = _re.search(r'(\d+\.?\d*)\s*$', cell.strip())
+                        if m:
+                            grp_weights[grp] = float(m.group(1))
+                    if grp_weights:
+                        packing_table[key] = grp_weights
+                    break
+
+        group_list   = list(group_cols.keys())
+        packing_list = list(packing_table.keys())
+        return packing_table, group_list, packing_list
+
+    PACKING_TABLE, GROUP_LIST, PACKING_LIST = load_packing_db()
+    # PLT당 박스 수 기본값 (추후 DB 시트 추가 시 확장 가능)
+    GROUP_PALLET_LIMIT = {"B01": 20, "B02": 20, "N18": 20, "N19": 20}
+
     current_team = st.session_state.selected_team
 
     if current_team == "해외영업팀":
         st.subheader("📦 수출 포장량 시뮬레이터", divider="rainbow")
-        with st.container(border=True):
-            total_target_weight = st.number_input("목표 총 중량 (kg)", min_value=0.0, value=800.0, step=10.0)
-            
-            # 자재그룹 및 포장재 선택
-            selected_group = st.selectbox("자재그룹", options=["선택하세요"] + list(GROUP_PALLET_LIMIT.keys()))
-            selected_packing = st.selectbox("포장재 종류", options=["선택하세요"] + list(PACKING_WEIGHTS.keys()))
 
-        # --- 계산 및 결과 출력 (자재/포장재가 선택되었을 때만) ---
-        if selected_group != "선택하세요" and selected_packing != "선택하세요":
-            unit_w = PACKING_WEIGHTS[selected_packing]
-            box_limit = GROUP_PALLET_LIMIT[selected_group]
-            
-            # 1. 기본 계산 로직
-            calc_boxes = total_target_weight / unit_w
-            calc_pallets = calc_boxes / box_limit
-            
+        with st.container(border=True):
+            total_target_weight = st.number_input(
+                "목표 총 중량 (kg)", min_value=0.0, value=800.0, step=10.0
+            )
+            selected_packing = st.selectbox(
+                "포장재 종류",
+                options=["선택하세요"] + (PACKING_LIST or [
+                    "제품-650박스","제품-1090박스","제품-세미박스",
+                    "제품-마대","제품-600박스",
+                    "슬리브-650박스","슬리브-세미박스","슬리브-600박스"
+                ])
+            )
+            # ── 복수 자재그룹 선택 (multiselect) ──────────────────────────
+            selected_groups = st.multiselect(
+                "자재그룹 (복수 선택 가능)",
+                options=GROUP_LIST or ["B01","B02","N18","N19"],
+                placeholder="자재그룹을 선택하세요 (여러 개 선택 가능)"
+            )
+
+            # 복수 선택 시 그룹별 중량 비율 입력
+            group_weights = {}   # {그룹명: 해당 그룹 중량(kg)}
+            if len(selected_groups) > 1:
+                st.markdown("**그룹별 중량 배분** (총합이 목표 중량과 같아야 합니다)")
+                ratio_cols = st.columns(len(selected_groups))
+                remaining = total_target_weight
+                for i, grp in enumerate(selected_groups):
+                    with ratio_cols[i]:
+                        if i < len(selected_groups) - 1:
+                            default_val = round(total_target_weight / len(selected_groups), 1)
+                            w = st.number_input(
+                                f"{grp} (kg)",
+                                min_value=0.0,
+                                max_value=float(total_target_weight),
+                                value=min(default_val, remaining),
+                                step=10.0,
+                                key=f"grp_weight_{grp}"
+                            )
+                            group_weights[grp] = w
+                            remaining -= w
+                        else:
+                            # 마지막 그룹은 나머지 자동 계산
+                            last_val = max(0.0, round(remaining, 1))
+                            st.metric(f"{grp} (kg)", f"{last_val:,.1f}")
+                            group_weights[grp] = last_val
+
+                # 합계 검증
+                total_assigned = sum(group_weights.values())
+                diff = abs(total_assigned - total_target_weight)
+                if diff > 0.5:
+                    st.warning(
+                        f"⚠️ 배분 합계 {total_assigned:,.1f}kg ≠ 목표 {total_target_weight:,.1f}kg "
+                        f"(차이: {diff:,.1f}kg)"
+                    )
+            elif len(selected_groups) == 1:
+                group_weights[selected_groups[0]] = total_target_weight
+
+        # ── 계산 시작 ────────────────────────────────────────────────────
+        if selected_groups and selected_packing != "선택하세요":
+
             st.markdown("#### 📊 시뮬레이션 결과")
-            
-            # 결과 대시보드
-            res_col1, res_col2 = st.columns(2)
-            with res_col1:
-                st.metric("필요 박스", f"{calc_boxes:.1f} PKG")
-            with res_col2:
-                st.metric("필요 PLT", f"{calc_pallets:.1f} PLT")
-                
-            st.caption(f"ℹ️ 적용 기준: 박스당 {unit_w}kg / PLT당 {box_limit}박스")
-            
-            # 2. 배차 및 컨테이너 분석
+
+            # 슬리브 안내
+            if "슬리브" in selected_packing:
+                st.info("ℹ️ 슬리브 항목은 현재 파렛트 포장으로 변경 중인 항목입니다.")
+
+            # ── 그룹별 개별 결과 테이블 ─────────────────────────────────
+            if len(selected_groups) > 1:
+                st.markdown("**그룹별 계산**")
+                rows = []
+                total_boxes   = 0.0
+                total_pallets = 0.0
+                for grp in selected_groups:
+                    gw        = group_weights.get(grp, 0.0)
+                    box_limit = GROUP_PALLET_LIMIT.get(grp, 20)
+                    # ★ 자재그룹별 실제 단위 중량 DB에서 조회
+                    unit_w = (PACKING_TABLE.get(selected_packing, {}).get(grp)
+                              or PACKING_TABLE.get(selected_packing, {}).get(list(PACKING_TABLE.get(selected_packing, {}).keys())[0] if PACKING_TABLE.get(selected_packing) else None))
+                    if not unit_w:
+                        st.warning(f"⚠️ {grp} × {selected_packing} 조합의 중량 데이터가 없습니다.")
+                        continue
+                    g_boxes   = gw / unit_w if unit_w else 0
+                    g_pallets = g_boxes / box_limit if box_limit else 0
+                    total_boxes   += g_boxes
+                    total_pallets += g_pallets
+                    rows.append({
+                        "자재그룹": grp,
+                        "중량(kg)": f"{gw:,.1f}",
+                        "박스당(kg)": f"{unit_w}",
+                        "박스(PKG)": f"{g_boxes:.1f}",
+                        "PLT": f"{g_pallets:.2f}",
+                        "PLT당 박스": str(box_limit)
+                    })
+                rows.append({
+                    "자재그룹": "✅ 합계",
+                    "중량(kg)": f"{sum(group_weights.values()):,.1f}",
+                    "박스당(kg)": "",
+                    "박스(PKG)": f"{total_boxes:.1f}",
+                    "PLT": f"{total_pallets:.2f}",
+                    "PLT당 박스": ""
+                })
+                import pandas as _pd
+                st.dataframe(
+                    _pd.DataFrame(rows),
+                    use_container_width=True,
+                    hide_index=True
+                )
+                calc_boxes   = total_boxes
+                calc_pallets = total_pallets
+
+            else:
+                # 단일 그룹
+                grp       = selected_groups[0]
+                box_limit = GROUP_PALLET_LIMIT.get(grp, 20)
+                # ★ 자재그룹별 실제 단위 중량 DB에서 조회
+                unit_w = PACKING_TABLE.get(selected_packing, {}).get(grp)
+                if not unit_w:
+                    st.warning(f"⚠️ {grp} × {selected_packing} 조합의 중량 데이터가 없습니다.")
+                    unit_w = 1
+                calc_boxes   = total_target_weight / unit_w
+                calc_pallets = calc_boxes / box_limit
+
+                res_col1, res_col2 = st.columns(2)
+                with res_col1:
+                    st.metric("필요 박스", f"{calc_boxes:.1f} PKG")
+                with res_col2:
+                    st.metric("필요 PLT", f"{calc_pallets:.1f} PLT")
+                st.caption(f"ℹ️ 적용 기준: {grp} × {selected_packing} = {unit_w}kg/박스 / PLT당 {box_limit}박스")
+
+            # ── 합산 요약 (복수 그룹일 때만) ─────────────────────────────
+            if len(selected_groups) > 1:
+                col1, col2, col3 = st.columns(3)
+                col1.metric("총 박스", f"{calc_boxes:.1f} PKG")
+                col2.metric("총 PLT", f"{calc_pallets:.2f} PLT")
+                col3.metric("포장재", selected_packing)
+
+            # ── 배차 및 컨테이너 분석 ─────────────────────────────────────
             best_truck = get_db_transport_advice(calc_pallets)
-    
+
             with st.expander("🚚 배차 및 컨테이너 분석", expanded=True):
                 if best_truck:
                     st.success(f"**추천 차량:** {best_truck['name']}")
                     st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
                     st.write(f"📦 **최대 적재 가능:** {best_truck['max_plt']} PLT")
-                    
-                    # --- [추가/수정] 컨테이너 최적화 및 추가 적재량 계산 ---
+
                     # 컨테이너 기준: 20ft(10 PLT), 40ft(20 PLT)
                     if calc_pallets <= 10:
-                        cntr_type = "20ft"
-                        max_cntr_plt = 10
+                        cntr_type, max_cntr_plt = "20ft", 10
                     else:
-                        cntr_type = "40ft"
-                        max_cntr_plt = 20
-                    
-                    cntr_count = int((calc_pallets // max_cntr_plt) + (1 if calc_pallets % max_cntr_plt > 0 else 0))
-                    st.info(f"🚢 **해외 운송 : {cntr_type} 컨테이너 {cntr_count}대 예상**")
+                        cntr_type, max_cntr_plt = "40ft", 20
 
-                    # 남은 공간 계산 (마지막 컨테이너 기준)
-                    used_last_plt = calc_pallets % max_cntr_plt
-                    if used_last_plt == 0 and calc_pallets > 0:
-                        used_last_plt = max_cntr_plt
-                    
-                    rem_plt = max_cntr_plt - used_last_plt
+                    cntr_count = int(
+                        (calc_pallets // max_cntr_plt) +
+                        (1 if calc_pallets % max_cntr_plt > 0 else 0)
+                    )
+                    st.info(f"🚢 **해외 운송: {cntr_type} 컨테이너 {cntr_count}대 예상**")
+
+                    # 남은 공간
+                    used_last = calc_pallets % max_cntr_plt
+                    if used_last == 0 and calc_pallets > 0:
+                        used_last = max_cntr_plt
+                    rem_plt = max_cntr_plt - used_last
 
                     if rem_plt > 0:
                         st.markdown(f"**💡 풀 컨테이너(FCL)를 위한 추가 가능량** (남은 공간: {rem_plt:.2f} PLT)")
-                        
-                        # 요청하신 자재그룹 리스트
-                        target_groups = ["B01", "B02", "N18", "N19"]
-                        
-                        # UI 구성을 위한 컬럼 생성
                         add_cols = st.columns(2)
-                        for idx, g_code in enumerate(target_groups):
+                        for idx, g_code in enumerate(["B01", "B02", "N18", "N19"]):
                             with add_cols[idx % 2]:
                                 if g_code in GROUP_PALLET_LIMIT:
-                                    g_box_limit = GROUP_PALLET_LIMIT[g_code]
-                                    # 남은 PLT 공간에 들어갈 박스 수 계산
-                                    add_boxes = int(rem_plt * g_box_limit)
+                                    add_boxes = int(rem_plt * GROUP_PALLET_LIMIT[g_code])
                                     st.write(f"**{g_code}** : {add_boxes}박스")
                                 else:
                                     st.write(f"**{g_code}** : 정보 없음")
@@ -868,15 +1033,22 @@ with st.sidebar:
                         st.success("✅ 현재 풀 컨테이너 상태입니다.")
                 else:
                     st.warning("⚠️ 대량 물량으로 인한 별도 배차 협의가 필요합니다.")
-            
-            # 3. 챗봇 연동 버튼
+
+            # ── 챗봇 연동 버튼 ────────────────────────────────────────────
             if st.button("💬 이 결과로 상세 문의하기", use_container_width=True):
-                query_msg = (f"{selected_group} 자재를 {selected_packing}으로 포장해서 {total_target_weight}kg 보낼 때, "
-                             f"계산된 {calc_boxes:.1f}박스 외에 추가로 주의할 적재 사항이 있어?")
+                grp_summary = ", ".join(
+                    f"{g}({group_weights.get(g,0):,.0f}kg)" for g in selected_groups
+                )
+                query_msg = (
+                    f"자재그룹 {grp_summary}을(를) {selected_packing}으로 포장해서 "
+                    f"총 {total_target_weight:,.0f}kg 수출할 때, "
+                    f"계산된 총 {calc_boxes:.1f}박스/{calc_pallets:.2f}PLT 외에 "
+                    f"추가로 주의할 적재·통관 사항이 있어?"
+                )
                 st.session_state.pending_query = query_msg
                 st.rerun()
         else:
-            st.info("자재와 포장재를 선택하시면 표준 규격에 따른 계산이 시작됩니다.")
+            st.info("자재그룹과 포장재를 선택하시면 시뮬레이션이 시작됩니다.")
 
     elif current_team == "국내영업팀":
         st.subheader("🚚 국내 최적 운임 비교", divider="rainbow")

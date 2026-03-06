@@ -34,15 +34,6 @@ QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "logistics_data")
 QDRANT_HOST = os.getenv("QDRANT_HOST", "http://localhost:6333")
 LEARNING_COLLECTION = os.getenv("LEARNING_COLLECTION", "learning_history")
 BAD_FEEDBACK_COLLECTION = os.getenv("BAD_FEEDBACK_COLLECTION", "bad_feedback_history")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
-ENV            = os.getenv("ENV", "local")
-# 클라이언트 생성
-client = QdrantClient(
-    url=QDRANT_HOST,
-    api_key=QDRANT_API_KEY if QDRANT_API_KEY else None,
-    verify=False if ENV == "local" else True   # 사내망=SSL 우회, 클라우드=정상
-)
-
 
 # 이메일 설정 (환경 변수에서 가져오기)
 EMAIL_ENABLED = os.getenv("EMAIL_ENABLED", "false").lower() == "true"
