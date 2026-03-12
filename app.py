@@ -928,6 +928,7 @@ with st.sidebar:
                 st.info("ℹ️ 슬리브 항목은 현재 파렛트 포장으로 변경 중인 항목입니다.")
 
             # ── 그룹별 개별 결과 테이블 ─────────────────────────────────
+            import math as _math
             if len(selected_groups) > 1:
                 st.markdown("**그룹별 계산**")
                 rows = []
@@ -942,24 +943,24 @@ with st.sidebar:
                     if not unit_w:
                         st.warning(f"⚠️ {grp} × {selected_packing} 조합의 중량 데이터가 없습니다.")
                         continue
-                    g_boxes   = gw / unit_w if unit_w else 0
-                    g_pallets = g_boxes / box_limit if box_limit else 0
+                    g_boxes   = _math.ceil(gw / unit_w) if unit_w else 0
+                    g_pallets = _math.ceil(g_boxes / box_limit) if box_limit else 0
                     total_boxes   += g_boxes
                     total_pallets += g_pallets
                     rows.append({
                         "자재그룹": grp,
                         "중량(kg)": f"{gw:,.1f}",
                         "박스당(kg)": f"{unit_w}",
-                        "박스(PKG)": f"{g_boxes:.1f}",
-                        "PLT": f"{g_pallets:.2f}",
+                        "박스(PKG)": f"{g_boxes}",
+                        "PLT": f"{g_pallets}",
                         "PLT당 박스": str(box_limit)
                     })
                 rows.append({
                     "자재그룹": "✅ 합계",
                     "중량(kg)": f"{sum(group_weights.values()):,.1f}",
                     "박스당(kg)": "",
-                    "박스(PKG)": f"{total_boxes:.1f}",
-                    "PLT": f"{total_pallets:.2f}",
+                    "박스(PKG)": f"{int(total_boxes)}",
+                    "PLT": f"{int(total_pallets)}",
                     "PLT당 박스": ""
                 })
                 import pandas as _pd
@@ -980,21 +981,21 @@ with st.sidebar:
                 if not unit_w:
                     st.warning(f"⚠️ {grp} × {selected_packing} 조합의 중량 데이터가 없습니다.")
                     unit_w = 1
-                calc_boxes   = total_target_weight / unit_w
-                calc_pallets = calc_boxes / box_limit
+                calc_boxes   = _math.ceil(total_target_weight / unit_w)
+                calc_pallets = _math.ceil(calc_boxes / box_limit)
 
                 res_col1, res_col2 = st.columns(2)
                 with res_col1:
-                    st.metric("필요 박스", f"{calc_boxes:.1f} PKG")
+                    st.metric("필요 박스", f"{calc_boxes} PKG")
                 with res_col2:
-                    st.metric("필요 PLT", f"{calc_pallets:.1f} PLT")
+                    st.metric("필요 PLT", f"{calc_pallets} PLT")
                 st.caption(f"ℹ️ 적용 기준: {grp} × {selected_packing} = {unit_w}kg/박스 / PLT당 {box_limit}박스")
 
             # ── 합산 요약 (복수 그룹일 때만) ─────────────────────────────
             if len(selected_groups) > 1:
                 col1, col2, col3 = st.columns(3)
-                col1.metric("총 박스", f"{calc_boxes:.1f} PKG")
-                col2.metric("총 PLT", f"{calc_pallets:.2f} PLT")
+                col1.metric("총 박스", f"{int(calc_boxes)} PKG")
+                col2.metric("총 PLT",  f"{int(calc_pallets)} PLT")
                 col3.metric("포장재", selected_packing)
 
             # ── 배차 및 컨테이너 분석 ─────────────────────────────────────
@@ -1047,7 +1048,7 @@ with st.sidebar:
                 query_msg = (
                     f"자재그룹 {grp_summary}을(를) {selected_packing}으로 포장해서 "
                     f"총 {total_target_weight:,.0f}kg 수출할 때, "
-                    f"계산된 총 {calc_boxes:.1f}박스/{calc_pallets:.2f}PLT 외에 "
+                    f"계산된 총 {int(calc_boxes)}박스/{int(calc_pallets)}PLT 외에 "
                     f"추가로 주의할 적재·통관 사항이 있어?"
                 )
                 st.session_state.pending_query = query_msg
@@ -1289,16 +1290,17 @@ with st.sidebar:
                 total_weight_kg = (weight_per_pc * dom_qty) if weight_per_pc else 0.0
 
                 st.markdown("#### 📊 적재 계산")
+                # 1행: 수량 / PLT당 최대 / 필요 파렛트
                 col_a, col_b, col_c = st.columns(3)
                 col_a.metric("수량",        f"{dom_qty} PC")
                 col_b.metric("PLT당 최대",  f"{max_pc} PC")
                 col_c.metric("필요 파렛트", f"{need_plt_ceil} PLT")
 
-                # ★ 중량 표시
+                # 2행: 중량 (데이터 있을 때만) — 2열로 넉넉하게
                 if weight_per_pc:
                     w_col1, w_col2 = st.columns(2)
                     w_col1.metric("1PC당 중량", f"{weight_per_pc:,.1f} kg")
-                    w_col2.metric("총 중량",    f"{total_weight_kg:,.1f} kg ({total_weight_kg/1000:.2f} ton)")
+                    w_col2.metric("총 중량",    f"{total_weight_kg:,.0f} kg / {total_weight_kg/1000:.2f} t")
 
                 st.caption(
                     f"파렛트 사이즈: {int(item['plt_w']*1000)} × {int(item['plt_l']*1000)} mm  |  "
@@ -1470,11 +1472,11 @@ with st.sidebar:
                 col_b.metric("PLT당 최대",  f"{max_pc} PC")
                 col_c.metric("필요 파렛트", f"{need_plt_ceil} PLT")
 
-                # ★ 중량 정보 표시
+                # 중량 정보 — 2열로 넉넉하게
                 if weight_per_pc:
                     w_col1, w_col2 = st.columns(2)
-                    w_col1.metric("1PC당 중량",   f"{weight_per_pc:,.1f} kg")
-                    w_col2.metric("총 중량",       f"{total_weight_kg:,.1f} kg ({total_weight_kg/1000:.2f} ton)")
+                    w_col1.metric("1PC당 중량", f"{weight_per_pc:,.1f} kg")
+                    w_col2.metric("총 중량",    f"{total_weight_kg:,.0f} kg / {total_weight_kg/1000:.2f} t")
 
                 st.caption(
                     f"파렛트 사이즈: {int(item['plt_w']*1000)} × {int(item['plt_l']*1000)} mm  |  "
