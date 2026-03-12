@@ -75,7 +75,7 @@ PROMPT_TEMPLATE = """당신은 DRB 물류 전문 AI 어시스턴트입니다.
 [질문]
 {input}
 
-[답변 작성 규칙]
+[답변 작성 규칙]ㅍ
 1. **출처 표기 금지**: "문서 1", "[문서 2]" 같은 내부 참조 번호를 절대 답변에 포함하지 마세요.
 2. **정보 통합**: 여러 데이터에 걸쳐 있는 정보는 하나로 합쳐서 자연스럽게 설명하세요.
 3. **계산 표현 방식**: 계산 과정은 반드시 아래 자연어 형식으로만 작성하세요. LaTeX 수식 문법(행렬, aligned 환경 등)을 절대 사용하지 마세요.
@@ -99,7 +99,26 @@ PROMPT_TEMPLATE = """당신은 DRB 물류 전문 AI 어시스턴트입니다.
     ④ 컨베어벨트 길이(M)가 질문에 없으면 계산 과정 ①②를 먼저 보여주고,
        "롤 직경 계산을 완성하려면 컨베어벨트 길이(M)를 알려주세요." 라고 요청하세요.
     ⑤ 길이가 주어진 경우 최종 롤 직경(m)과 mm 단위 환산값을 함께 제시하세요.
+    
+11. **담당자/인원 조회 규칙**: '담당자', '담당', '누구', '연락처', '전화번호', '인원' 등의 키워드가 포함된 질문은
+    반드시 [물류팀 현황 데이터]를 우선 참조하여 아래 기준으로 필터링하세요.
 
+    [업무 영역 키워드 매핑]
+    - "국내", "내수", "내수출고", "내수담당"  → 담당 공정에 "내수" 포함된 인원
+    - "수출", "해외", "수출담당"             → 담당 공정에 "수출" 포함된 인원
+    - "입고", "입고담당"                     → 담당 공정에 "입고" 포함된 인원
+    - "원자재", "원자재 담당"               → 담당 공정에 "원자재" 포함된 인원
+    - "컨베어", "크롤러", "트랙"             → 담당 공정에 "컨베어" 또는 "크롤러" 포함된 인원
+    - "중부", "중부물류센터"                 → 담당 공정에 "중부" 포함된 인원
+    - "베트남"                              → 담당 공정에 "베트남" 포함된 인원
+    - "청도"                                → 담당 공정에 "청도" 포함된 인원
+    - "팀장", "총괄"                         → 구분이 팀장이거나 물류팀 총괄 인원
+    - "지입기사", "기사", "부산기사"          → 부산공장/중부물류센터 지입기사 인원
+
+    [답변 형식]
+    해당 인원을 표 형식으로 정리하세요:
+    | 성명 | 직책 | 담당 공정 | 연락처(내선) |
+    전화번호가 0인 경우 "직통번호 없음 (내선 문의)"으로 표시하세요.
 답변:"""
 
 class EmailNotifier:
@@ -155,7 +174,64 @@ class EmailNotifier:
             
         except Exception as e:
             logger.error(f"❌ 이메일 전송 실패: {e}")
-    
+
+    def send_improvement_request(self, content: str, team: str):
+        """개선 요청 이메일 전송"""
+        if not self.enabled:
+            return False
+        try:
+            from email.utils import formataddr
+            ts = datetime.now().strftime("%Y년 %m월 %d일 %H:%M")
+            html_content = f"""<!DOCTYPE html>
+<html lang="ko"><head><meta charset="UTF-8">
+<style>
+  body {{ font-family: 'Malgun Gothic', sans-serif; background:#f4f6f9; margin:0; padding:20px; }}
+  .wrap {{ max-width:640px; margin:auto; background:#fff; border-radius:12px;
+           box-shadow:0 4px 16px rgba(0,0,0,.1); overflow:hidden; }}
+  .header {{ background:linear-gradient(135deg,#667eea,#764ba2); padding:28px 32px; color:#fff; }}
+  .header h1 {{ margin:0; font-size:20px; }}
+  .header p  {{ margin:6px 0 0; opacity:.85; font-size:13px; }}
+  .body {{ padding:28px 32px; }}
+  .meta {{ background:#f8f9fc; border-radius:8px; padding:14px 18px;
+           font-size:13px; color:#555; margin-bottom:20px; }}
+  .meta span {{ font-weight:700; color:#333; }}
+  .content-box {{ background:#fff8e1; border-left:4px solid #f59e0b;
+                  border-radius:6px; padding:16px 20px; font-size:14px;
+                  line-height:1.8; color:#333; white-space:pre-wrap; }}
+  .footer {{ background:#f4f6f9; padding:16px 32px; font-size:12px;
+             color:#888; text-align:center; }}
+</style></head><body>
+<div class="wrap">
+  <div class="header">
+    <h1>💡 개선 요청이 접수되었습니다</h1>
+    <p>DRB LOGIBOT-AI · 개선 요청 알림</p>
+  </div>
+  <div class="body">
+    <div class="meta">
+      <p>📅 접수 일시 : <span>{ts}</span></p>
+      <p>👥 요청 모드 : <span>{team}</span></p>
+    </div>
+    <p style="font-size:14px;font-weight:700;color:#444;margin-bottom:10px;">📝 요청 내용</p>
+    <div class="content-box">{content}</div>
+  </div>
+  <div class="footer">본 메일은 DRB LOGIBOT-AI 개선 요청 시스템에서 자동 발송되었습니다.</div>
+</div>
+</body></html>"""
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = f"[LOGIBOT] 개선 요청 접수 - {datetime.now().strftime('%Y-%m-%d %H:%M')} ({team})"
+            msg['From']    = formataddr(("DRB LOGIBOT-AI", self.email_from))
+            msg['To']      = ', '.join(self.email_to)
+            msg.attach(MIMEText(html_content, 'html', 'utf-8'))
+            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+                server.starttls()
+                server.login(self.username, self.password)
+                server.send_message(msg)
+            logger.info(f"✅ 개선 요청 이메일 전송 완료 ({team})")
+            return True
+        except Exception as e:
+            logger.error(f"❌ 개선 요청 이메일 전송 실패: {e}")
+            return False
+
     def _create_html_email(self, feedback_data: Dict) -> str:
         """HTML 형식의 이메일 본문 생성 (구조화 버전)"""
         query     = feedback_data.get('query', 'N/A')
@@ -453,7 +529,7 @@ class RAGChainWrapper:
             return "conveyor"
 
         # 크롤러/러버트랙 도메인
-        crawler_kw = ["크롤러", "러버트랙", "RT", "트랙", "배차", "몇 톤", "파렛트"]
+        crawler_kw = ["크롤러", "러버트랙", "RT", "트랙", "배차", "몇 톤", "파렛트", "Rubber Track"]
         if any(k in combined for k in crawler_kw):
             return "crawler"
 
@@ -1168,9 +1244,12 @@ def analyze_pdf_logistics(file_bytes):
     except Exception as e:
         return f"❌ PDF 처리 실패: {str(e)}"
     
-def get_db_transport_advice(total_pallets: float):
+def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0):
     """
     차량 데이터 WHOLE 문서(파이프 구분 텍스트)를 파싱해 최적 차량 추천
+    total_pallets   : 필요 파렛트 수 (부피 기준)
+    total_weight_kg : 총 중량 kg (0이면 중량 조건 무시)
+    반환 dict 추가 키: max_weight_ton, weight_ok
     """
     PLT_W, PLT_L = 1.1, 1.1  # 표준 파렛트 1100×1100mm
 
@@ -1191,8 +1270,8 @@ def get_db_transport_advice(total_pallets: float):
         if not search_result:
             return None
 
-        # WHOLE 전략: page_content = "차량 데이터\n1톤 | ~ 1.32톤 | 2.8m | 1.6m\n..."
         content = search_result[0].payload.get("page_content", "")
+        total_weight_ton = total_weight_kg / 1000.0
 
         candidates = []
         for line in content.split('\n'):
@@ -1200,7 +1279,6 @@ def get_db_transport_advice(total_pallets: float):
             if len(parts) < 4:
                 continue
             name = parts[0]
-            # 헤더 / 섹션 제목 / 특이사항 줄 스킵
             if not name or '톤수' in name or name.startswith('[') or '특이사항' in name or '높이' in name:
                 continue
             try:
@@ -1209,19 +1287,42 @@ def get_db_transport_advice(total_pallets: float):
             except Exception:
                 continue
 
+            # 최대중량 파싱 (예: "~ 1.32", "1.33 ~ 2.75")
+            max_weight_ton = None
+            if len(parts) >= 2:
+                nums = re.findall(r'[\d.]+', parts[1])
+                if nums:
+                    max_weight_ton = float(nums[-1])
+
             cols    = int(width  / PLT_W)
             rows    = int(length / PLT_L)
             max_plt = cols * rows
 
-            if max_plt >= total_pallets:
-                candidates.append({
-                    "name"   : name,
-                    "spec"   : f"길이 {length}m / 폭 {width}m",
-                    "max_plt": max_plt
-                })
+            if max_plt < total_pallets:
+                continue
 
-        if candidates:
-            return sorted(candidates, key=lambda x: x['max_plt'])[0]
+            weight_ok = True
+            if total_weight_ton > 0 and max_weight_ton is not None:
+                weight_ok = total_weight_ton <= max_weight_ton
+
+            candidates.append({
+                "name"          : name,
+                "spec"          : f"길이 {length}m / 폭 {width}m",
+                "max_plt"       : max_plt,
+                "max_weight_ton": max_weight_ton,
+                "weight_ok"     : weight_ok,
+            })
+
+        if not candidates:
+            return None
+
+        # 중량·부피 모두 충족 우선, 없으면 부피만 충족으로 fallback
+        ok_both = [c for c in candidates if c["weight_ok"]]
+        pool    = ok_both if ok_both else candidates
+        return sorted(pool, key=lambda x: x['max_plt'])[0]
+
+    except Exception as e:
+        logger.error(f"⚠️ DB 배차 조회 중 오류: {e}")
         return None
 
     except Exception as e:

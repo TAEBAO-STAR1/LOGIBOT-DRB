@@ -172,12 +172,17 @@ def show_source_popup(sources: list, query: str):
 
 # RAG 인터페이스 연결
 try:
-    from rag_pipeline.query_processor import get_rag_response, submit_feedback, analyze_logistics_data, analyze_pdf_logistics, get_db_transport_advice
+    from rag_pipeline.query_processor import get_rag_response, submit_feedback, analyze_logistics_data, analyze_pdf_logistics, get_db_transport_advice, EMAIL_NOTIFIER
     import logging
     logger = logging.getLogger(__name__)
 except ImportError:
     def get_rag_response(q, context=None): return {"answer": "답변입니다.", "has_table": False}
     def submit_feedback(q, s, c, src): pass
+    def get_db_transport_advice(p, w=0): return None
+    class _DummyNotifier:
+        enabled = False
+        def send_improvement_request(self, content, team): return False
+    EMAIL_NOTIFIER = _DummyNotifier()
     import logging
     logger = logging.getLogger(__name__)
 
@@ -1178,8 +1183,161 @@ with st.sidebar:
                         f"({dist_type}, 추천: {best_option})를 바탕으로 고객 상담용 멘트를 작성해줘."
                     )
                     st.rerun()
-    
-   
+
+        # ── 국내 최적 배차 시뮬레이터 (국내영업팀 전용) ─────────────────────
+        st.markdown("---")
+        st.subheader("🚛 최적 배차 시뮬레이터", divider="rainbow")
+
+        with st.container(border=True):
+            dom_item_code = st.text_input(
+                "🔖 자재코드", placeholder="예: 6004216", key="dom_item_code"
+            ).strip().split(".")[0].strip()
+            dom_qty = st.number_input("📦 수량 (PC)", min_value=1, value=1, key="dom_qty")
+
+        if dom_item_code:
+            # 크롤러 데이터 로드 (load_crawler_data 재사용)
+            @st.cache_data(ttl=300)
+            def load_crawler_data_dom():
+                import glob as _glob
+                CRAWLER_SHEET_KEYWORD = "크롤러"
+                search_paths = (
+                    _glob.glob("data/source_docs/*V4*.xlsx") +
+                    _glob.glob("data/source_docs/*V3*.xlsx") +
+                    _glob.glob("data/source_docs/*.xlsx") +
+                    _glob.glob("/mnt/user-data/uploads/*V4*.xlsx") +
+                    _glob.glob("/mnt/user-data/uploads/*.xlsx")
+                )
+                df = None
+                for path in search_paths:
+                    try:
+                        xf = pd.ExcelFile(path)
+                        crawler_sheet = next(
+                            (s for s in xf.sheet_names if CRAWLER_SHEET_KEYWORD in s), None
+                        )
+                        if not crawler_sheet:
+                            continue
+                        df_test = pd.read_excel(path, sheet_name=crawler_sheet, header=0, nrows=2)
+                        first_col = str(df_test.columns[0])
+                        if first_col.startswith("[") or "Unnamed" in first_col:
+                            df = pd.read_excel(path, sheet_name=crawler_sheet, header=1).fillna("")
+                        else:
+                            df = pd.read_excel(path, sheet_name=crawler_sheet, header=0).fillna("")
+                        break
+                    except Exception:
+                        continue
+                if df is None:
+                    return {}
+                cols = df.columns.tolist()
+                def find_col(kw):
+                    return next((c for c in cols if kw in str(c)), None)
+                code_col   = find_col("자재코드")
+                name_col   = find_col("자재내역")
+                qty_col    = find_col("최대 적재 수량") or find_col("적재 수량")
+                size_col   = find_col("사이즈")
+                weight_col = find_col("중량") or find_col("KG") or find_col("kg")  # ★ 중량 탐지
+                if not code_col:
+                    return {}
+                data = {}
+                for _, row in df.iterrows():
+                    code = str(row.get(code_col, "")).strip().split(".")[0].strip()
+                    if not code or code in ("nan", ""):
+                        continue
+                    size_raw = str(row.get(size_col, "1000*1100")).strip() if size_col else "1000*1100"
+                    try:
+                        w_mm, l_mm = [float(x) for x in size_raw.replace("×", "*").split("*")]
+                    except Exception:
+                        w_mm, l_mm = 1000.0, 1100.0
+                    try:
+                        max_pc = int(float(str(row.get(qty_col, 1)).strip())) if qty_col else 1
+                    except Exception:
+                        max_pc = 1
+                    weight_per_pc = None
+                    if weight_col:
+                        try:
+                            val = str(row.get(weight_col, "")).strip()
+                            if val and val not in ("nan", ""):
+                                weight_per_pc = float(val)
+                        except Exception:
+                            weight_per_pc = None
+                    data[code] = {
+                        "name"         : str(row.get(name_col, "")).strip() if name_col else "",
+                        "max_pc"       : max_pc,
+                        "plt_w"        : w_mm / 1000,
+                        "plt_l"        : l_mm / 1000,
+                        "weight_per_pc": weight_per_pc,   # ★ kg/PC
+                    }
+                return data
+
+            DOM_CRAWLER_DATA = load_crawler_data_dom()
+            item = DOM_CRAWLER_DATA.get(dom_item_code)
+
+            if not item:
+                partials = [c for c in DOM_CRAWLER_DATA if dom_item_code in c]
+                if partials:
+                    st.warning(f"정확한 코드를 찾지 못했습니다. 유사 코드: {', '.join(partials[:5])}")
+                else:
+                    st.error("❌ 등록되지 않은 자재코드입니다. DB를 확인해주세요.")
+            else:
+                st.markdown(f"**자재내역:** `{item['name']}`")
+
+                max_pc        = item['max_pc']
+                need_plt      = dom_qty / max_pc
+                need_plt_ceil = -(-dom_qty // max_pc)
+
+                # ★ 총 중량 계산
+                weight_per_pc   = item.get('weight_per_pc')
+                total_weight_kg = (weight_per_pc * dom_qty) if weight_per_pc else 0.0
+
+                st.markdown("#### 📊 적재 계산")
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("수량",        f"{dom_qty} PC")
+                col_b.metric("PLT당 최대",  f"{max_pc} PC")
+                col_c.metric("필요 파렛트", f"{need_plt_ceil} PLT")
+
+                # ★ 중량 표시
+                if weight_per_pc:
+                    w_col1, w_col2 = st.columns(2)
+                    w_col1.metric("1PC당 중량", f"{weight_per_pc:,.1f} kg")
+                    w_col2.metric("총 중량",    f"{total_weight_kg:,.1f} kg ({total_weight_kg/1000:.2f} ton)")
+
+                st.caption(
+                    f"파렛트 사이즈: {int(item['plt_w']*1000)} × {int(item['plt_l']*1000)} mm  |  "
+                    f"계산: {dom_qty} ÷ {max_pc} = {need_plt:.2f} → 올림 {need_plt_ceil} PLT"
+                )
+
+                # ★ 부피 + 중량 이중 기준 차량 추천
+                best_truck = get_db_transport_advice(need_plt_ceil, total_weight_kg)
+                with st.expander("🚚 최적 배차 추천", expanded=True):
+                    if best_truck:
+                        st.success(f"**추천 차량:** {best_truck['name']}")
+                        st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
+                        st.write(f"📦 **최대 적재:** {best_truck['max_plt']} PLT")
+                        if best_truck.get('max_weight_ton'):
+                            st.write(f"⚖️ **최대 중량:** {best_truck['max_weight_ton']} ton")
+                        load_ratio = (need_plt_ceil / best_truck['max_plt']) * 100
+                        st.progress(min(load_ratio / 100, 1.0))
+                        st.caption(f"적재율: {load_ratio:.1f}%")
+                        if weight_per_pc and not best_truck.get('weight_ok', True):
+                            st.warning(
+                                f"⚠️ 총 중량 {total_weight_kg/1000:.2f}ton이 차량 최대 허용 중량을 초과합니다. "
+                                f"물류팀에 별도 협의가 필요합니다."
+                            )
+                    else:
+                        st.warning("⚠️ 적합한 차량이 없습니다. 물류팀에 직접 문의하세요.")
+
+                if st.button("💬 이 배차 정보로 문의하기", use_container_width=True, key="dom_truck_query"):
+                    truck_name  = best_truck['name'] if best_truck else "없음"
+                    weight_info = f", 총 중량 {total_weight_kg:,.0f}kg" if weight_per_pc else ""
+                    st.session_state.pending_query = (
+                        f"자재코드 {dom_item_code}({item['name']}), 수량 {dom_qty}PC{weight_info} → "
+                        f"{need_plt_ceil}PLT 기준 배차 추천 결과({truck_name})를 확인했습니다. "
+                        f"실제 배차 가능 여부와 주의사항을 알려줘."
+                    )
+                    st.rerun()
+        else:
+            st.info("자재코드와 수량을 입력하시면 DB 기반으로 최적 차량을 분석합니다.")
+
+
     elif current_team == "트랙영업팀":
         st.subheader("🚜 크롤러 배차 시뮬레이터", divider="rainbow")
 
@@ -1234,17 +1392,18 @@ with st.sidebar:
             def find_col(kw):
                 return next((c for c in cols if kw in str(c)), None)
 
-            code_col = find_col("자재코드")
-            name_col = find_col("자재내역")
-            qty_col  = find_col("최대 적재 수량") or find_col("적재 수량")
-            size_col = find_col("사이즈")
+            code_col   = find_col("자재코드")
+            name_col   = find_col("자재내역")
+            qty_col    = find_col("최대 적재 수량") or find_col("적재 수량")
+            size_col   = find_col("사이즈")
+            weight_col = find_col("중량") or find_col("KG") or find_col("kg")  # ★ 중량 컬럼 탐지
 
             if not code_col:
                 return {}
 
             data = {}
             for _, row in df.iterrows():
-                code = str(row.get(code_col, "")).strip()
+                code = str(row.get(code_col, "")).strip().split(".")[0].strip()
                 if not code or code in ("nan", ""):
                     continue
                 size_raw = str(row.get(size_col, "1000*1100")).strip() if size_col else "1000*1100"
@@ -1256,11 +1415,21 @@ with st.sidebar:
                     max_pc = int(float(str(row.get(qty_col, 1)).strip())) if qty_col else 1
                 except Exception:
                     max_pc = 1
+                # ★ 1PC당 중량(kg) 파싱
+                weight_per_pc = None
+                if weight_col:
+                    try:
+                        val = str(row.get(weight_col, "")).strip()
+                        if val and val not in ("nan", ""):
+                            weight_per_pc = float(val)
+                    except Exception:
+                        weight_per_pc = None
                 data[code] = {
-                    "name"  : str(row.get(name_col, "")).strip() if name_col else "",
-                    "max_pc": max_pc,
-                    "plt_w" : w_mm / 1000,
-                    "plt_l" : l_mm / 1000,
+                    "name"         : str(row.get(name_col, "")).strip() if name_col else "",
+                    "max_pc"       : max_pc,
+                    "plt_w"        : w_mm / 1000,
+                    "plt_l"        : l_mm / 1000,
+                    "weight_per_pc": weight_per_pc,   # ★ kg/PC (없으면 None)
                 }
             return data
 
@@ -1270,7 +1439,7 @@ with st.sidebar:
         with st.container(border=True):
             t_item_code = st.text_input(
                 "🔖 자재코드", placeholder="예: 6004216"
-            ).strip()
+            ).strip().split(".")[0].strip()
             t_qty = st.number_input("📦 수량 (PC)", min_value=1, value=1)
 
         # ── 계산 ───────────────────────────────────────────────────────────
@@ -1287,37 +1456,57 @@ with st.sidebar:
                 st.markdown(f"**자재내역:** `{item['name']}`")
 
                 # 파렛트 수 계산
-                max_pc   = item['max_pc']
-                need_plt = t_qty / max_pc
-                need_plt_ceil = -(-t_qty // max_pc)   # 올림 정수
+                max_pc        = item['max_pc']
+                need_plt      = t_qty / max_pc
+                need_plt_ceil = -(-t_qty // max_pc)
+
+                # ★ 총 중량 계산
+                weight_per_pc  = item.get('weight_per_pc')
+                total_weight_kg = (weight_per_pc * t_qty) if weight_per_pc else 0.0
 
                 st.markdown("#### 📊 적재 계산")
                 col_a, col_b, col_c = st.columns(3)
-                col_a.metric("수량", f"{t_qty} PC")
-                col_b.metric("PLT당 최대", f"{max_pc} PC")
+                col_a.metric("수량",        f"{t_qty} PC")
+                col_b.metric("PLT당 최대",  f"{max_pc} PC")
                 col_c.metric("필요 파렛트", f"{need_plt_ceil} PLT")
+
+                # ★ 중량 정보 표시
+                if weight_per_pc:
+                    w_col1, w_col2 = st.columns(2)
+                    w_col1.metric("1PC당 중량",   f"{weight_per_pc:,.1f} kg")
+                    w_col2.metric("총 중량",       f"{total_weight_kg:,.1f} kg ({total_weight_kg/1000:.2f} ton)")
+
                 st.caption(
                     f"파렛트 사이즈: {int(item['plt_w']*1000)} × {int(item['plt_l']*1000)} mm  |  "
                     f"계산: {t_qty} ÷ {max_pc} = {need_plt:.2f} → 올림 {need_plt_ceil} PLT"
                 )
 
-                # 차량 추천
-                best_truck = get_db_transport_advice(need_plt_ceil)
+                # ★ 차량 추천 - 부피 + 중량 이중 기준
+                best_truck = get_db_transport_advice(need_plt_ceil, total_weight_kg)
                 with st.expander("🚚 최적 배차 추천", expanded=True):
                     if best_truck:
                         st.success(f"**추천 차량:** {best_truck['name']}")
                         st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
                         st.write(f"📦 **최대 적재:** {best_truck['max_plt']} PLT")
+                        if best_truck.get('max_weight_ton'):
+                            st.write(f"⚖️ **최대 중량:** {best_truck['max_weight_ton']} ton")
                         load_ratio = (need_plt_ceil / best_truck['max_plt']) * 100
                         st.progress(min(load_ratio / 100, 1.0))
                         st.caption(f"적재율: {load_ratio:.1f}%")
+                        # ★ 중량 초과 경고
+                        if weight_per_pc and not best_truck.get('weight_ok', True):
+                            st.warning(
+                                f"⚠️ 총 중량 {total_weight_kg/1000:.2f}ton이 차량 최대 허용 중량을 초과합니다. "
+                                f"물류팀에 별도 협의가 필요합니다."
+                            )
                     else:
                         st.warning("⚠️ 적합한 차량이 없습니다. 물류팀에 직접 문의하세요.")
 
                 if st.button("💬 이 배차 정보로 문의하기", use_container_width=True):
                     truck_name = best_truck['name'] if best_truck else "없음"
+                    weight_info = f", 총 중량 {total_weight_kg:,.0f}kg" if weight_per_pc else ""
                     st.session_state.pending_query = (
-                        f"자재코드 {t_item_code}({item['name']}), 수량 {t_qty}PC → "
+                        f"자재코드 {t_item_code}({item['name']}), 수량 {t_qty}PC{weight_info} → "
                         f"{need_plt_ceil}PLT 기준 배차 추천 결과({truck_name})를 확인했습니다. "
                         f"실제 배차 가능 여부와 주의사항을 알려줘."
                     )
@@ -1325,6 +1514,60 @@ with st.sidebar:
         else:
             st.info("자재코드와 수량을 입력하시면 DB 기반으로 최적 차량을 분석합니다.")
                        
+# ── 개선 요청 버튼 & 팝업 ────────────────────────────────────────────────
+if "show_improve_form" not in st.session_state:
+    st.session_state.show_improve_form = False
+if "improve_submitted" not in st.session_state:
+    st.session_state.improve_submitted = False
+
+# 버튼 행: 오른쪽 정렬을 위해 컬럼 분할
+_btn_spacer, _btn_col = st.columns([7, 1])
+with _btn_col:
+    if st.button("💡 개선 요청", use_container_width=True, key="open_improve_form"):
+        st.session_state.show_improve_form = not st.session_state.show_improve_form
+        st.session_state.improve_submitted = False
+
+# 팝업 말풍선
+if st.session_state.show_improve_form:
+    with st.container(border=True):
+        st.markdown(
+            "<p style='font-size:15px;font-weight:700;margin-bottom:4px;'>💡 개선 요청하기</p>"
+            "<p style='font-size:12px;color:#888;margin-top:0;'>기능 개선, 오류 신고, 아이디어 등 자유롭게 작성해주세요.</p>",
+            unsafe_allow_html=True
+        )
+        improve_text = st.text_area(
+            label="내용 입력",
+            placeholder="예) 특정 자재코드 검색 시 결과가 없습니다.\n예) 운임 계산에 ○○ 지역이 추가되면 좋겠습니다.",
+            height=130,
+            key="improve_text_input",
+            label_visibility="collapsed"
+        )
+        _sub_col, _cancel_col = st.columns([1, 1])
+        with _sub_col:
+            if st.button("📨 제출하기", use_container_width=True, key="submit_improve"):
+                if not improve_text.strip():
+                    st.warning("내용을 입력해주세요.")
+                else:
+                    current_team_for_mail = st.session_state.get("selected_team", "전체")
+                    try:
+                        success = EMAIL_NOTIFIER.send_improvement_request(
+                            content=improve_text.strip(),
+                            team=current_team_for_mail
+                        )
+                    except Exception:
+                        success = False
+                    st.session_state.improve_submitted = True
+                    st.session_state.show_improve_form = False
+                    if success:
+                        st.toast("✅ 개선 요청이 담당자에게 전달되었습니다!", icon="💡")
+                    else:
+                        st.toast("⚠️ 전송에 실패했습니다. 직접 담당자에게 문의해주세요.", icon="⚠️")
+                    st.rerun()
+        with _cancel_col:
+            if st.button("✖ 취소", use_container_width=True, key="cancel_improve"):
+                st.session_state.show_improve_form = False
+                st.rerun()
+
 st.title("📦 DRB LOGIBOT-AI")
 curr_conv = st.session_state.conversations[st.session_state.current_id]
 
