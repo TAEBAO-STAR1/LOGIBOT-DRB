@@ -1274,6 +1274,7 @@ def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0):
         total_weight_ton = total_weight_kg / 1000.0
 
         candidates = []
+        lowbed_entry = None   # 로베드는 높이 기준 특수차량 — 별도 보관
         for line in content.split('\n'):
             parts = [p.strip() for p in line.split('|')]
             if len(parts) < 4:
@@ -1281,6 +1282,25 @@ def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0):
             name = parts[0]
             if not name or '톤수' in name or name.startswith('[') or '특이사항' in name or '높이' in name:
                 continue
+
+            # ★ 로베드(Low-v/Low-bed)는 적재함 길이가 아닌 높이 기준 차량
+            #    → 일반 부피 계산에서 제외, 별도 보관
+            is_lowbed = any(kw in name for kw in ('로브이', 'Low-v', 'Low-bed', '로베드', 'low-bed', 'low-v'))
+            if is_lowbed:
+                max_weight_ton_lb = None
+                nums_lb = re.findall(r'[\d.]+', parts[1]) if len(parts) >= 2 else []
+                if nums_lb:
+                    max_weight_ton_lb = float(nums_lb[-1])
+                lowbed_entry = {
+                    "name"          : name,
+                    "spec"          : "높이 2.6m 이상 제품 전용 특수차량",
+                    "max_plt"       : 999,
+                    "max_weight_ton": max_weight_ton_lb,
+                    "weight_ok"     : True,
+                    "is_lowbed"     : True,
+                }
+                continue   # 일반 후보 계산에서 제외
+
             try:
                 length = float(re.search(r'([\d.]+)m', parts[2]).group(1))
                 width  = float(re.search(r'([\d.]+)m', parts[3]).group(1))
@@ -1311,6 +1331,7 @@ def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0):
                 "max_plt"       : max_plt,
                 "max_weight_ton": max_weight_ton,
                 "weight_ok"     : weight_ok,
+                "is_lowbed"     : False,
             })
 
         if not candidates:

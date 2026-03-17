@@ -268,6 +268,36 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# --- 사이드바 고정 CSS (축소/확장 버튼 및 리사이즈 비활성화) ---
+st.markdown("""
+    <style>
+    /* 사이드바 접기/펼치기 토글 버튼 숨김 */
+    button[data-testid="collapsedControl"],
+    [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+    /* 사이드바 드래그 리사이즈 핸들 비활성화 */
+    [data-testid="stSidebarResizeHandle"],
+    .st-emotion-cache-1cypcdb,
+    div[class*="resizeHandle"],
+    div[class*="ResizeHandle"] {
+        display: none !important;
+        pointer-events: none !important;
+    }
+    /* 사이드바 최소 너비 고정 */
+    [data-testid="stSidebar"] {
+        min-width: 21rem !important;
+        max-width: 21rem !important;
+        width: 21rem !important;
+    }
+    [data-testid="stSidebar"] > div:first-child {
+        min-width: 21rem !important;
+        max-width: 21rem !important;
+        width: 21rem !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 # --- 추천 질문 데이터 ---
 TEAM_SUGGESTIONS = {
     "국내영업팀": [
@@ -1168,15 +1198,29 @@ with st.sidebar:
                 # 기준표 expander
                 with st.expander("📋 운임 선택 기준 전체 보기"):
                     st.markdown("""
-| 거리 구분 | 권역 | 중량 기준 | 추천 방법 |
-|-----------|------|-----------|-----------|
-| **단거리** | 영남권(경남/경북), 부산권 | 300 kg 이하 | 화물/택배 |
-| **단거리** | 영남권(경남/경북), 부산권 | 300 kg 초과 | 직송 |
-| **장거리** | 강원권, 경기권, 서울권, 인천권, 전남권, 전북권, 충남권, 충북권 | 800 kg 미만 | 화물/택배 |
-| **장거리** | 강원권, 경기권, 서울권, 인천권, 전남권, 전북권, 충남권, 충북권 | 800 kg 이상 | 직송 |
-
-> 기준 데이터: 용차·배차 차량 노선 데이터
-                    """)
+<style>
+.fare-card{background:var(--secondary-background-color);border-radius:8px;
+           padding:9px 12px;margin-bottom:6px;font-size:12px;line-height:1.6;}
+.fare-card .badge{display:inline-block;padding:1px 7px;border-radius:10px;
+                  font-size:11px;font-weight:700;margin-right:4px;}
+.badge-short{background:#dbeafe;color:#1d4ed8;}
+.badge-long {background:#fef3c7;color:#92400e;}
+.badge-cargo{background:#dcfce7;color:#166534;}
+.badge-direct{background:#fce7f3;color:#9d174d;}
+</style>
+<div class="fare-card">
+  <span class="badge badge-short">단거리</span> 영남권·부산권<br>
+  300kg 이하 → <span class="badge badge-cargo">화물/택배</span><br>
+  300kg 초과 → <span class="badge badge-direct">직송</span>
+</div>
+<div class="fare-card">
+  <span class="badge badge-long">장거리</span> 강원·경기·서울·인천<br>
+  전남·전북·충남·충북<br>
+  800kg 미만 → <span class="badge badge-cargo">화물/택배</span><br>
+  800kg 이상 → <span class="badge badge-direct">직송</span>
+</div>
+<div style="font-size:11px;color:#888;margin-top:4px;">※ 기준: 용차·배차 차량 노선 데이터</div>
+""", unsafe_allow_html=True)
 
                 if st.button("💬 이 운임으로 견적 상담하기", use_container_width=True):
                     st.session_state.pending_query = (
@@ -1290,17 +1334,39 @@ with st.sidebar:
                 total_weight_kg = (weight_per_pc * dom_qty) if weight_per_pc else 0.0
 
                 st.markdown("#### 📊 적재 계산")
-                # 1행: 수량 / PLT당 최대 / 필요 파렛트
-                col_a, col_b, col_c = st.columns(3)
-                col_a.metric("수량",        f"{dom_qty} PC")
-                col_b.metric("PLT당 최대",  f"{max_pc} PC")
-                col_c.metric("필요 파렛트", f"{need_plt_ceil} PLT")
+                # 1행: 수량 / PLT당 최대 / 필요 파렛트 — 작은 HTML 카드
+                st.markdown(f"""
+<div style="display:flex;gap:6px;margin-bottom:6px;">
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:8px;padding:8px 10px;text-align:center;">
+    <div style="font-size:13px;color:#888;margin-bottom:2px;">수량</div>
+    <div style="font-size:15px;font-weight:700;">{dom_qty} PC</div>
+  </div>
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:8px;padding:8px 10px;text-align:center;">
+    <div style="font-size:13px;color:#888;margin-bottom:2px;">PLT당 최대</div>
+    <div style="font-size:15px;font-weight:700;">{max_pc} PC</div>
+  </div>
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:8px;padding:8px 10px;text-align:center;">
+    <div style="font-size:13px;color:#888;margin-bottom:2px;">필요 파렛트</div>
+    <div style="font-size:15px;font-weight:700;">{need_plt_ceil} PLT</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-                # 2행: 중량 (데이터 있을 때만) — 2열로 넉넉하게
+                # 2행: 중량 (데이터 있을 때만) — 톤수 줄바꿈으로 잘림 방지
                 if weight_per_pc:
-                    w_col1, w_col2 = st.columns(2)
-                    w_col1.metric("1PC당 중량", f"{weight_per_pc:,.1f} kg")
-                    w_col2.metric("총 중량",    f"{total_weight_kg:,.0f} kg / {total_weight_kg/1000:.2f} t")
+                    st.markdown(f"""
+<div style="display:flex;gap:6px;margin-bottom:6px;">
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:8px;padding:8px 10px;text-align:center;">
+    <div style="font-size:13px;color:#888;margin-bottom:2px;">1PC당 중량</div>
+    <div style="font-size:15px;font-weight:700;">{weight_per_pc:,.1f} kg</div>
+  </div>
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:8px;padding:8px 10px;text-align:center;">
+    <div style="font-size:13px;color:#888;margin-bottom:2px;">총 중량</div>
+    <div style="font-size:15px;font-weight:700;">{total_weight_kg:,.0f} kg</div>
+    <div style="font-size:12px;color:#888;">({total_weight_kg/1000:.2f} ton)</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
                 st.caption(
                     f"파렛트 사이즈: {int(item['plt_w']*1000)} × {int(item['plt_l']*1000)} mm  |  "
@@ -1311,19 +1377,22 @@ with st.sidebar:
                 best_truck = get_db_transport_advice(need_plt_ceil, total_weight_kg)
                 with st.expander("🚚 최적 배차 추천", expanded=True):
                     if best_truck:
-                        st.success(f"**추천 차량:** {best_truck['name']}")
-                        st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
-                        st.write(f"📦 **최대 적재:** {best_truck['max_plt']} PLT")
-                        if best_truck.get('max_weight_ton'):
-                            st.write(f"⚖️ **최대 중량:** {best_truck['max_weight_ton']} ton")
-                        load_ratio = (need_plt_ceil / best_truck['max_plt']) * 100
-                        st.progress(min(load_ratio / 100, 1.0))
-                        st.caption(f"적재율: {load_ratio:.1f}%")
-                        if weight_per_pc and not best_truck.get('weight_ok', True):
-                            st.warning(
-                                f"⚠️ 총 중량 {total_weight_kg/1000:.2f}ton이 차량 최대 허용 중량을 초과합니다. "
-                                f"물류팀에 별도 협의가 필요합니다."
-                            )
+                        if best_truck.get('is_lowbed'):
+                            st.info("🚛 **로베드(Low-bed) 차량**\n\n제품 높이 2.6m 이상인 경우 선택하는 특수 차량입니다. 물류팀에 직접 문의하세요.")
+                        else:
+                            st.success(f"**추천 차량:** {best_truck['name']}")
+                            st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
+                            st.write(f"📦 **최대 적재:** {best_truck['max_plt']} PLT")
+                            if best_truck.get('max_weight_ton'):
+                                st.write(f"⚖️ **최대 중량:** {best_truck['max_weight_ton']} ton")
+                            load_ratio = (need_plt_ceil / best_truck['max_plt']) * 100
+                            st.progress(min(load_ratio / 100, 1.0))
+                            st.caption(f"적재율: {load_ratio:.1f}%")
+                            if weight_per_pc and not best_truck.get('weight_ok', True):
+                                st.warning(
+                                    f"⚠️ 총 중량 {total_weight_kg/1000:.2f}ton이 차량 최대 허용 중량을 초과합니다. "
+                                    f"물류팀에 별도 협의가 필요합니다."
+                                )
                     else:
                         st.warning("⚠️ 적합한 차량이 없습니다. 물류팀에 직접 문의하세요.")
 
@@ -1467,16 +1536,38 @@ with st.sidebar:
                 total_weight_kg = (weight_per_pc * t_qty) if weight_per_pc else 0.0
 
                 st.markdown("#### 📊 적재 계산")
-                col_a, col_b, col_c = st.columns(3)
-                col_a.metric("수량",        f"{t_qty} PC")
-                col_b.metric("PLT당 최대",  f"{max_pc} PC")
-                col_c.metric("필요 파렛트", f"{need_plt_ceil} PLT")
+                st.markdown(f"""
+<div style="display:flex;gap:6px;margin-bottom:6px;">
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:8px;padding:8px 10px;text-align:center;">
+    <div style="font-size:13px;color:#888;margin-bottom:2px;">수량</div>
+    <div style="font-size:15px;font-weight:700;">{t_qty} PC</div>
+  </div>
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:8px;padding:8px 10px;text-align:center;">
+    <div style="font-size:13px;color:#888;margin-bottom:2px;">PLT당 최대</div>
+    <div style="font-size:15px;font-weight:700;">{max_pc} PC</div>
+  </div>
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:8px;padding:8px 10px;text-align:center;">
+    <div style="font-size:13px;color:#888;margin-bottom:2px;">필요 파렛트</div>
+    <div style="font-size:15px;font-weight:700;">{need_plt_ceil} PLT</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-                # 중량 정보 — 2열로 넉넉하게
+                # 중량 정보 — 톤수 줄바꿈으로 잘림 방지
                 if weight_per_pc:
-                    w_col1, w_col2 = st.columns(2)
-                    w_col1.metric("1PC당 중량", f"{weight_per_pc:,.1f} kg")
-                    w_col2.metric("총 중량",    f"{total_weight_kg:,.0f} kg / {total_weight_kg/1000:.2f} t")
+                    st.markdown(f"""
+<div style="display:flex;gap:6px;margin-bottom:6px;">
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:8px;padding:8px 10px;text-align:center;">
+    <div style="font-size:13px;color:#888;margin-bottom:2px;">1PC당 중량</div>
+    <div style="font-size:15px;font-weight:700;">{weight_per_pc:,.1f} kg</div>
+  </div>
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:8px;padding:8px 10px;text-align:center;">
+    <div style="font-size:13px;color:#888;margin-bottom:2px;">총 중량</div>
+    <div style="font-size:15px;font-weight:700;">{total_weight_kg:,.0f} kg</div>
+    <div style="font-size:12px;color:#888;">({total_weight_kg/1000:.2f} ton)</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
                 st.caption(
                     f"파렛트 사이즈: {int(item['plt_w']*1000)} × {int(item['plt_l']*1000)} mm  |  "
@@ -1487,20 +1578,22 @@ with st.sidebar:
                 best_truck = get_db_transport_advice(need_plt_ceil, total_weight_kg)
                 with st.expander("🚚 최적 배차 추천", expanded=True):
                     if best_truck:
-                        st.success(f"**추천 차량:** {best_truck['name']}")
-                        st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
-                        st.write(f"📦 **최대 적재:** {best_truck['max_plt']} PLT")
-                        if best_truck.get('max_weight_ton'):
-                            st.write(f"⚖️ **최대 중량:** {best_truck['max_weight_ton']} ton")
-                        load_ratio = (need_plt_ceil / best_truck['max_plt']) * 100
-                        st.progress(min(load_ratio / 100, 1.0))
-                        st.caption(f"적재율: {load_ratio:.1f}%")
-                        # ★ 중량 초과 경고
-                        if weight_per_pc and not best_truck.get('weight_ok', True):
-                            st.warning(
-                                f"⚠️ 총 중량 {total_weight_kg/1000:.2f}ton이 차량 최대 허용 중량을 초과합니다. "
-                                f"물류팀에 별도 협의가 필요합니다."
-                            )
+                        if best_truck.get('is_lowbed'):
+                            st.info("🚛 **로베드(Low-bed) 차량**\n\n제품 높이 2.6m 이상인 경우 선택하는 특수 차량입니다. 물류팀에 직접 문의하세요.")
+                        else:
+                            st.success(f"**추천 차량:** {best_truck['name']}")
+                            st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
+                            st.write(f"📦 **최대 적재:** {best_truck['max_plt']} PLT")
+                            if best_truck.get('max_weight_ton'):
+                                st.write(f"⚖️ **최대 중량:** {best_truck['max_weight_ton']} ton")
+                            load_ratio = (need_plt_ceil / best_truck['max_plt']) * 100
+                            st.progress(min(load_ratio / 100, 1.0))
+                            st.caption(f"적재율: {load_ratio:.1f}%")
+                            if weight_per_pc and not best_truck.get('weight_ok', True):
+                                st.warning(
+                                    f"⚠️ 총 중량 {total_weight_kg/1000:.2f}ton이 차량 최대 허용 중량을 초과합니다. "
+                                    f"물류팀에 별도 협의가 필요합니다."
+                                )
                     else:
                         st.warning("⚠️ 적합한 차량이 없습니다. 물류팀에 직접 문의하세요.")
 
