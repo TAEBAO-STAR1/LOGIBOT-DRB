@@ -1125,109 +1125,154 @@ with st.sidebar:
         import glob as glob  # 함수 안에서도 사용 가능하도록
         SHORT_DEST, LONG_DEST = load_route_data()
 
-        def classify_distance(dest: str):
+        # ── 지역 → 구간 분류 (3구간) ─────────────────────────────────────
+        # 구간 A: 녹산/대저/명지/경남권  → 300kg 기준
+        # 구간 B: 부산시내              → 150kg 기준
+        # 구간 C: 이외 장거리           → 800kg 기준
+        ZONE_A_KEYWORDS = ["녹산", "대저", "명지", "경남", "양산", "창원", "마산", "진주", "거제", "통영", "사천", "밀양", "함안", "거창", "합천", "의령", "남해", "하동", "산청", "함양", "고성", "창녕"]
+        ZONE_B_KEYWORDS = ["부산", "해운대", "동래", "사상", "사하", "강서", "금정", "북구", "동구", "서구", "중구", "영도", "연제", "수영", "남구", "기장"]
+
+        def classify_zone(dest: str):
             """
-            입력 문자열로 단거리/장거리 판별.
-            V3 형식: '부산(경남권)' — 괄호 안 권역명 포함 검색도 지원
+            입력 도착지 → (zone, threshold, label) 반환
+            zone A: 녹산/대저/명지/경남권 — 300kg
+            zone B: 부산시내              — 150kg
+            zone C: 장거리                — 800kg
             """
-            dest = dest.strip()
-            # ① 정확히 일치
-            if dest in SHORT_DEST: return "단거리"
-            if dest in LONG_DEST:  return "장거리"
-            # ② 도착지가 '지명(권역)' 형식인 경우: 지명만 추출해서 재비교
-            #    예: 사용자가 '부산' 입력 → DB는 '부산(경남권)'
-            for d in SHORT_DEST:
-                city = d.split("(")[0].strip()
-                if dest == city or dest in d:
-                    return "단거리"
-            for d in LONG_DEST:
-                city = d.split("(")[0].strip()
-                if dest == city or dest in d:
-                    return "장거리"
-            return None
+            dest_lower = dest.strip()
+            # Zone A 우선 (경남권 키워드)
+            for kw in ZONE_A_KEYWORDS:
+                if kw in dest_lower:
+                    return "A", 300, "녹산·대저·명지·경남권"
+            # Zone B (부산 키워드) — 단, 경남 이미 매칭된 경우 제외
+            for kw in ZONE_B_KEYWORDS:
+                if kw in dest_lower:
+                    return "B", 150, "부산시내"
+            # Zone C: DB 장거리 or 기본 장거리
+            return "C", 800, "장거리"
 
         # ── 입력 폼 ────────────────────────────────────────────────────────
         with st.container(border=True):
-            destination  = st.text_input("📍 도착 지역", placeholder="예: 서울, 부산, 대구, 광주")
+            destination  = st.text_input("📍 도착 지역", placeholder="예: 부산, 창원, 서울, 광주")
             total_weight = st.number_input("⚖️ 총 중량 (kg)", min_value=1, value=100)
 
         # ── 분석 ───────────────────────────────────────────────────────────
         if destination:
-            dist_type = classify_distance(destination)
+            zone, threshold, zone_label = classify_zone(destination)
+            is_direct = total_weight > threshold
+            best_option = "직송" if is_direct else "화물/택배"
 
-            if dist_type is None:
-                st.warning(f"⚠️ **{destination}** 지역이 노선 데이터에 없습니다. 권역 이름(예: 서울권, 경남권)이나 시/군 명칭을 입력해주세요.")
+            # ── 결과 UI ───────────────────────────────────────────────────
+            # 색상 팔레트
+            if is_direct:
+                accent      = "#2563eb"   # 파랑 — 직송
+                accent_light= "#dbeafe"
+                result_icon = "🚛"
             else:
-                # ── 단거리 기준: 300kg 이하 → 화물/택배, 초과 → 직송 ──────
-                # ── 장거리 기준: 800kg 이상 → 직송, 미만 → 화물/택배 ────────
-                if dist_type == "단거리":
-                    if total_weight <= 300:
-                        best_option = "화물/택배"
-                        reason = f"단거리({destination}) + {total_weight}kg 이하 → 화물/택배가 유리"
-                        badge_color = "#16a34a"
-                    else:
-                        best_option = "직송"
-                        reason = f"단거리({destination}) + 300kg 초과({total_weight}kg) → 직송이 유리"
-                        badge_color = "#2563eb"
-                else:  # 장거리
-                    if total_weight >= 800:
-                        best_option = "직송"
-                        reason = f"장거리({destination}) + 800kg 이상({total_weight}kg) → 직송이 유리"
-                        badge_color = "#2563eb"
-                    else:
-                        best_option = "화물/택배"
-                        reason = f"장거리({destination}) + 800kg 미만({total_weight}kg) → 화물/택배가 유리"
-                        badge_color = "#16a34a"
+                accent      = "#16a34a"   # 초록 — 화물/택배
+                accent_light= "#dcfce7"
+                result_icon = "📦"
 
-                # 결과 배지 (색상 고정 → 다크/라이트 모두 흰 글자로 명확)
-                st.markdown(
-                    f'<div style="background:{badge_color};color:#ffffff;padding:14px 20px;'
-                    f'border-radius:10px;font-size:16px;font-weight:700;margin-bottom:12px;">'
-                    f'🏆 추천: {best_option}</div>',
-                    unsafe_allow_html=True
-                )
+            zone_colors = {"A": ("#f59e0b", "#fef3c7"), "B": ("#8b5cf6", "#ede9fe"), "C": ("#64748b", "#f1f5f9")}
+            zc, zc_light = zone_colors[zone]
 
-                # 거리/중량 기준 카드 — st.info 사용으로 다크모드 자동 대응
-                dist_icon = "🔵" if dist_type == "단거리" else "🟠"
-                st.info(
-                    f"{dist_icon} **거리 구분:** {dist_type} ({destination})  \n"
-                    f"⚖️ **중량:** {total_weight:,} kg  \n"
-                    f"📌 **판단 근거:** {reason}"
-                )
-
-                # 기준표 expander
-                with st.expander("📋 운임 선택 기준 전체 보기"):
-                    st.markdown("""
+            st.markdown(f"""
 <style>
-.fare-card{background:var(--secondary-background-color);border-radius:8px;
-           padding:9px 12px;margin-bottom:6px;font-size:12px;line-height:1.6;}
-.fare-card .badge{display:inline-block;padding:1px 7px;border-radius:10px;
-                  font-size:11px;font-weight:700;margin-right:4px;}
-.badge-short{background:#dbeafe;color:#1d4ed8;}
-.badge-long {background:#fef3c7;color:#92400e;}
-.badge-cargo{background:#dcfce7;color:#166534;}
-.badge-direct{background:#fce7f3;color:#9d174d;}
+.fare-result-wrap{{margin-top:4px;}}
+.fare-hero{{
+  background:linear-gradient(135deg,{accent}ee,{accent}bb);
+  border-radius:14px;padding:16px 18px;margin-bottom:10px;
+  display:flex;align-items:center;gap:12px;
+}}
+.fare-hero-icon{{font-size:28px;line-height:1;}}
+.fare-hero-text{{color:#fff;}}
+.fare-hero-label{{font-size:11px;opacity:.85;letter-spacing:.5px;text-transform:uppercase;}}
+.fare-hero-value{{font-size:22px;font-weight:800;line-height:1.2;}}
+.fare-row{{display:flex;gap:8px;margin-bottom:8px;}}
+.fare-chip{{
+  flex:1;border-radius:10px;padding:10px 12px;
+  background:var(--secondary-background-color);
+}}
+.fare-chip-label{{font-size:11px;color:#888;margin-bottom:3px;}}
+.fare-chip-value{{font-size:14px;font-weight:700;}}
+.fare-zone-badge{{
+  display:inline-block;padding:2px 10px;border-radius:20px;
+  font-size:11px;font-weight:700;
+  background:{zc_light};color:{zc};
+}}
+.fare-divider{{border:none;border-top:1px solid var(--secondary-background-color);margin:10px 0;}}
 </style>
-<div class="fare-card">
-  <span class="badge badge-short">단거리</span> 영남권·부산권<br>
-  300kg 이하 → <span class="badge badge-cargo">화물/택배</span><br>
-  300kg 초과 → <span class="badge badge-direct">직송</span>
+<div class="fare-result-wrap">
+  <div class="fare-hero">
+    <div class="fare-hero-icon">{result_icon}</div>
+    <div class="fare-hero-text">
+      <div class="fare-hero-label">추천 운임 방법</div>
+      <div class="fare-hero-value">{best_option}</div>
+    </div>
+  </div>
+  <div class="fare-row">
+    <div class="fare-chip">
+      <div class="fare-chip-label">도착 지역</div>
+      <div class="fare-chip-value">{destination} <span class="fare-zone-badge">{zone_label}</span></div>
+    </div>
+  </div>
+  <div class="fare-row">
+    <div class="fare-chip">
+      <div class="fare-chip-label">총 중량</div>
+      <div class="fare-chip-value">{total_weight:,} kg</div>
+    </div>
+    <div class="fare-chip">
+      <div class="fare-chip-label">판단 기준</div>
+      <div class="fare-chip-value">{threshold:,} kg {'초과 → 직송' if is_direct else '이하 → 화물/택배'}</div>
+    </div>
+  </div>
 </div>
-<div class="fare-card">
-  <span class="badge badge-long">장거리</span> 강원·경기·서울·인천<br>
-  전남·전북·충남·충북<br>
-  800kg 미만 → <span class="badge badge-cargo">화물/택배</span><br>
-  800kg 이상 → <span class="badge badge-direct">직송</span>
-</div>
-<div style="font-size:11px;color:#888;margin-top:4px;">※ 기준: 용차·배차 차량 노선 데이터</div>
 """, unsafe_allow_html=True)
 
-                if st.button("💬 이 운임으로 견적 상담하기", use_container_width=True):
-                    st.session_state.pending_query = (
-                        f"{destination} 지역 {total_weight}kg 기준 운임 비교 결과 "
-                        f"({dist_type}, 추천: {best_option})를 바탕으로 고객 상담용 멘트를 작성해줘."
-                    )
-                    st.rerun()
+            # 기준표 expander — 3구간 카드
+            with st.expander("📋 운임 선택 기준 전체 보기"):
+                st.markdown(f"""
+<style>
+.zone-card{{border-radius:10px;padding:11px 14px;margin-bottom:8px;border-left:4px solid;background:var(--secondary-background-color);}}
+.zone-a{{border-color:#f59e0b;}}
+.zone-b{{border-color:#8b5cf6;}}
+.zone-c{{border-color:#64748b;}}
+.zone-title{{font-size:12px;font-weight:700;margin-bottom:5px;color:var(--text-color);}}
+.zone-row{{font-size:12px;line-height:1.8;color:var(--text-color);}}
+.tag{{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;}}
+.tag-d{{background:rgba(37,99,235,0.15);color:#2563eb;border:1px solid rgba(37,99,235,0.3);}}
+.tag-c{{background:rgba(22,163,74,0.15);color:#16a34a;border:1px solid rgba(22,163,74,0.3);}}
+</style>
+<div class="zone-card zone-a">
+  <div class="zone-title">🟡 녹산·대저·명지·경남권</div>
+  <div class="zone-row">
+    300 kg 이하 → <span class="tag tag-c">화물/택배</span><br>
+    300 kg 초과 → <span class="tag tag-d">직송</span>
+  </div>
+</div>
+<div class="zone-card zone-b">
+  <div class="zone-title">🟣 부산시내</div>
+  <div class="zone-row">
+    150 kg 이하 → <span class="tag tag-c">화물/택배</span><br>
+    150 kg 초과 → <span class="tag tag-d">직송</span>
+  </div>
+</div>
+<div class="zone-card zone-c">
+  <div class="zone-title">⚫ 이외 장거리</div>
+  <div class="zone-row">
+    800 kg 이하 → <span class="tag tag-c">화물/택배</span><br>
+    800 kg 초과 → <span class="tag tag-d">직송</span>
+  </div>
+</div>
+<div style="font-size:11px;color:#999;margin-top:4px;">※ 기준: 물류팀 운영 규칙</div>
+""", unsafe_allow_html=True)
+
+            if st.button("💬 이 운임으로 견적 상담하기", use_container_width=True):
+                st.session_state.pending_query = (
+                    f"{destination}({zone_label}) 지역 {total_weight}kg 기준 운임 비교 결과 "
+                    f"(기준 {threshold}kg, 추천: {best_option})를 바탕으로 고객 상담용 멘트를 작성해줘."
+                )
+                st.rerun()
 
         # ── 국내 최적 배차 시뮬레이터 (국내영업팀 전용) ─────────────────────
         st.markdown("---")
