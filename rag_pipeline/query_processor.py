@@ -75,7 +75,7 @@ PROMPT_TEMPLATE = """당신은 DRB 물류 전문 AI 어시스턴트입니다.
 [질문]
 {input}
 
-[답변 작성 규칙]ㅍ
+[답변 작성 규칙]
 1. **출처 표기 금지**: "문서 1", "[문서 2]" 같은 내부 참조 번호를 절대 답변에 포함하지 마세요.
 2. **정보 통합**: 여러 데이터에 걸쳐 있는 정보는 하나로 합쳐서 자연스럽게 설명하세요.
 3. **계산 표현 방식**: 계산 과정은 반드시 아래 자연어 형식으로만 작성하세요. LaTeX 수식 문법(행렬, aligned 환경 등)을 절대 사용하지 마세요.
@@ -119,6 +119,20 @@ PROMPT_TEMPLATE = """당신은 DRB 물류 전문 AI 어시스턴트입니다.
     해당 인원을 표 형식으로 정리하세요:
     | 성명 | 직책 | 담당 공정 | 연락처(내선) |
     전화번호가 0인 경우 "직통번호 없음 (내선 문의)"으로 표시하세요.
+
+12. **지입기사 납품 동선/노선 규칙**: '지입기사', '납품 동선', '노선', '배달 경로', '기사 노선', '동선' 키워드가 포함된 질문은
+    반드시 [지입 차량(기사) 노선 데이터]를 참조하여 아래 규칙을 엄격히 따르세요.
+
+    [핵심 해석 규칙 - 반드시 준수]
+    - 데이터에 월~금요일 행이 모두 있는 기사 = 주 5일(월~금) 매일 운행하는 기사입니다. "특정 요일만 운행"이라고 절대 말하지 마세요.
+    - 요일별 도착지가 다른 것은 "그 날에만 운행"이 아니라 "그 날의 납품 코스(동선)가 다름"을 의미합니다.
+    - 데이터에 등록된 기사 전원(부산공장 기사 + 중부물류센터 기사)을 빠짐없이 모두 답변에 포함하세요. 누락하면 오답입니다.
+
+    [답변 형식]
+    기사별로 구분하여 요일별 납품 동선을 정리하세요:
+    ## 기사명 (소속)
+    | 요일 | 납품 동선 |
+    특정 요일을 질문한 경우 해당 요일 행만 추출해서 보여주세요.
 답변:"""
 
 class EmailNotifier:
@@ -519,9 +533,15 @@ class RAGChainWrapper:
     def _detect_domain(self, query: str, keyword_doc_content: str = "") -> str:
         """
         질문 + 검색된 문서 내용을 기반으로 도메인 판별
-        반환값: 'conveyor' | 'crawler' | 'export' | 'general'
+        반환값: 'conveyor' | 'crawler' | 'export' | 'driver_route' | 'general'
         """
         combined = query + " " + keyword_doc_content
+
+        # 지입기사 납품 동선 도메인 (우선 감지)
+        driver_kw = ["지입기사", "납품 동선", "동선", "기사 노선", "납품 노선", "배달 경로",
+                     "김병일", "김영철", "이용구", "심효섭", "부산기사", "중부기사"]
+        if any(k in combined for k in driver_kw):
+            return "driver_route"
 
         # 컨베어벨트 도메인
         conveyor_kw = ["컨베어", "컨베이어", "직경", "롤", "NN", "EP", "포규격", "심체", "컨베어벨트"]
@@ -572,10 +592,11 @@ class RAGChainWrapper:
 
     # 도메인별 보완 시트 매핑
     DOMAIN_SUPPLEMENT_SHEETS = {
-        "conveyor": ["컨베어벨트 직경 산출 수식"],
-        "crawler" : ["차량 데이터"],
-        "export"  : ["수출 포장량 산출 수식", "포장량 산출 데이터"],
-        "general" : ["차량 데이터"],
+        "conveyor"     : ["컨베어벨트 직경 산출 수식"],
+        "crawler"      : ["차량 데이터"],
+        "export"       : ["수출 포장량 산출 수식", "포장량 산출 데이터"],
+        "driver_route" : ["지입 차량(기사) 노선 데이터"],  # 지입기사 전체 노선
+        "general"      : ["차량 데이터"],
     }
 
     def hybrid_search(self, query: str, k: int = 50):
@@ -611,6 +632,17 @@ class RAGChainWrapper:
                 filtered_results = [(doc, score) for doc, score in vector_results if score >= 0.15]
             else:
                 filtered_results = vector_results
+
+            # 지입기사 동선 질문이면 노선 전체 문서를 강제 보완 (누락 방지)
+            domain = self._detect_domain(query)
+            if domain == "driver_route":
+                driver_docs = self.fetch_whole_docs(["지입 차량(기사) 노선 데이터"], limit=10)
+                # 이미 포함된 문서는 중복 제거
+                existing_contents = {doc.page_content[:50] for doc, _ in filtered_results}
+                for doc, score in driver_docs:
+                    if doc.page_content[:50] not in existing_contents:
+                        filtered_results.append((doc, score))
+                logger.info(f"지입기사 노선 보완: {len(driver_docs)}개 추가")
 
             logger.info(f"벡터 검색 결과 확보: {len(filtered_results)}개")
             return filtered_results
@@ -925,13 +957,13 @@ def search_ddg(query: str) -> str:
 
 
 def format_answer(answer: str) -> str:
-    """LaTeX 변환 및 숫자 점수 제거"""
+    """LaTeX 변환, 숫자 점수 제거, 마크다운 특수문자 정리"""
     if not answer:
         return ""
 
     # 유사도 점수 패턴 제거
     answer = re.sub(r'\s?\d\.\d{3}\b', '', answer)
-    
+
     # LaTeX 변환
     answer = re.sub(r'\\frac\{(.+?)\}\{(.+?)\}', r'(\1 / \2)', answer)
     answer = answer.replace(r'\times', '×').replace(r'\cdot', '·')
@@ -939,7 +971,32 @@ def format_answer(answer: str) -> str:
     answer = answer.replace(r'\left(', '(').replace(r'\right)', ')')
     answer = answer.replace('[ ', '').replace(' ]', '')
     answer = answer.replace(r'\,', ' ')
-    
+
+    # ── 마크다운 특수문자 정리 ──────────────────────────────────────────
+    # **(답변)** 같이 답변 구조 태그로 쓰인 ** 제거
+    # 단, 표(|...|) 안에 있는 **bold**는 앱에서 HTML로 변환되므로 유지
+    lines = answer.split('\n')
+    cleaned = []
+    for line in lines:
+        # 표 행은 건드리지 않음
+        if line.strip().startswith('|'):
+            cleaned.append(line)
+            continue
+        # 헤더(##) 줄도 유지 (md_to_html_answer가 처리)
+        if re.match(r'^#{1,3}\s', line.strip()):
+            cleaned.append(line)
+            continue
+        # **(레이블)** 패턴: 줄 맨 앞에 오는 구조 태그 형태 제거
+        # 예) **(답변)**, **(핵심)**, **(요약)** 등
+        line = re.sub(r'^\s*\*\*\([^)]+\)\*\*\s*', '', line)
+        # 줄 중간에 **텍스트:** 형태도 텍스트만 남김 (콜론 포함)
+        line = re.sub(r'\*\*([^*]+):\*\*', r'\1:', line)
+        cleaned.append(line)
+    answer = '\n'.join(cleaned)
+
+    # 연속 빈 줄 2개 이상 → 1개로 압축
+    answer = re.sub(r'\n{3,}', '\n\n', answer)
+
     return answer.strip()
 
 

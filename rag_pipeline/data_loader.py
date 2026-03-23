@@ -54,6 +54,8 @@ SHEET_STRATEGY: Dict[str, str] = {
     "주름혹벨트 우든박스 사이즈" : "ROW",
     "크롤러 러버트랙"            : "ROW",
     "용차, 배차 차량 노선 데이터": "GROUP",
+    # 지입기사 노선: 4명 기사 전원을 1개 문서로 묶어야 검색 시 누락 없음
+    "지입 차량(기사) 노선 데이터": "WHOLE",
 }
 
 # ── 유틸 ─────────────────────────────────────────────────────────────────────
@@ -70,6 +72,50 @@ def extract_material_code(text: str) -> str:
         if m:
             return m.group(1)
     return ""
+
+
+# ── 지입기사 노선 전용 : 4명 기사 전원을 1개 문서로 ─────────────────────────
+def sheet_to_driver_route_doc(df: pd.DataFrame, sheet_name: str, file_name: str) -> List[Document]:
+    """
+    지입기사 노선 시트 전용 변환.
+    4명 기사 전원의 요일별 납품 동선을 1개 문서로 묶어 검색 누락 방지.
+    """
+    lines = [
+        f"[{sheet_name}]",
+        "※ 아래 기사들은 모두 주 5일(월~금) 매일 운행합니다. 요일별 납품 코스(동선)가 다를 뿐입니다.\n"
+    ]
+
+    cols = df.columns.tolist()
+    driver_col = cols[0]
+    day_col    = cols[1] if len(cols) > 1 else None
+    dest_col   = cols[2] if len(cols) > 2 else None
+
+    current_driver = None
+    for _, row in df.iterrows():
+        driver = clean_val(str(row.get(driver_col, "")))
+        day    = clean_val(str(row.get(day_col,    ""))) if day_col  else ""
+        dest   = clean_val(str(row.get(dest_col,   ""))) if dest_col else ""
+
+        if driver and driver != current_driver:
+            current_driver = driver
+            driver_clean = driver.replace('\n', ' ')
+            lines.append(f"\n## {driver_clean}")
+            lines.append("| 요일 | 납품 동선 |")
+            lines.append("|------|----------|")
+
+        if day and dest:
+            dest_clean = dest.replace('\n', ' / ')
+            lines.append(f"| {day} | {dest_clean} |")
+
+    content = "\n".join(lines).strip()
+    if len(content) < 30:
+        return []
+    return [Document(
+        page_content=content,
+        metadata={"source": file_name, "file_name": file_name,
+                  "sheet_name": sheet_name, "strategy": "WHOLE",
+                  "file_type": "excel", "doc_type": "driver_route"}
+    )]
 
 
 # ── WHOLE : 시트 전체를 구조화 텍스트 1개 문서로 ────────────────────────────
@@ -236,9 +282,13 @@ def load_excel(file_path: str) -> List[Document]:
             strategy = SHEET_STRATEGY.get(sheet_name, "ROW")
             logger.info(f"  [{sheet_name}] 전략:{strategy} ({len(df)}행)")
 
-            fn = {"WHOLE": sheet_to_whole_doc, "QA": sheet_to_qa_docs,
-                  "GROUP": sheet_to_group_docs, "ROW": sheet_to_row_docs}[strategy]
-            docs = fn(df, sheet_name, file_name)
+            # 지입기사 노선 시트는 전용 함수 사용 (기사 누락 방지)
+            if sheet_name == "지입 차량(기사) 노선 데이터":
+                docs = sheet_to_driver_route_doc(df, sheet_name, file_name)
+            else:
+                fn = {"WHOLE": sheet_to_whole_doc, "QA": sheet_to_qa_docs,
+                      "GROUP": sheet_to_group_docs, "ROW": sheet_to_row_docs}[strategy]
+                docs = fn(df, sheet_name, file_name)
             logger.info(f"    → {len(docs)}개 문서")
             documents.extend(docs)
 
