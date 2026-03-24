@@ -133,6 +133,13 @@ PROMPT_TEMPLATE = """당신은 DRB 물류 전문 AI 어시스턴트입니다.
     ## 기사명 (소속)
     | 요일 | 납품 동선 |
     특정 요일을 질문한 경우 해당 요일 행만 추출해서 보여주세요.
+
+13. **자재코드 단독 질문 규칙**: 자재코드(7자리 숫자)만 입력하고 자재 종류를 명시하지 않은 질문에도
+    [참고 데이터]에 해당 코드 정보가 포함되어 있으면 반드시 아래 순서로 답변하세요.
+    ① 자재 종류 자동 식별 (컨베어벨트/주름혹벨트/크롤러 러버트랙 중 어느 시트에서 왔는지)
+    ② 자재내역(제품명), 자재그룹, 중량 등 기본 정보 먼저 제시
+    ③ 질문에 "중량", "적재", "배차", "직경" 등 추가 키워드가 있으면 해당 계산도 함께 수행
+    ④ 시트 구분 없이 코드만으로 모든 정보를 제공할 수 있음을 전제로 답변하세요.
 답변:"""
 
 class EmailNotifier:
@@ -412,6 +419,9 @@ class OnPremiseGemmaLLM(LLM):
         self._last_call_ts = time.time()
     
     def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
+        return self._call_with_max_tokens(prompt, max_tokens=2048)
+
+    def _call_with_max_tokens(self, prompt: str, max_tokens: int = 2048) -> str:
         self._enforce_rate_limit()
         
         payload = {
@@ -419,7 +429,7 @@ class OnPremiseGemmaLLM(LLM):
             "messages": [{"role": "user", "content": prompt}],
             "temperature": self.temperature,
             "stream": False,
-            "max_tokens": 2048
+            "max_tokens": max_tokens
         }
         
         for attempt in range(1, self.max_retries + 1):
@@ -470,23 +480,89 @@ class OnPremiseGemmaLLM(LLM):
 
 class RAGChainWrapper:
     """RAG 체인 래퍼 (검색 최적화)"""
+
+    # 시트명 → 도메인 매핑
+    SHEET_TO_DOMAIN = {
+        "컨베어벨트 규격 데이터"         : "conveyor",
+        "주름혹벨트 우든박스 사이즈 데이터": "sidewall",   # 주름혹벨트 전용
+        "크롤러 러버트랙 규격 데이터"      : "crawler",
+    }
+
     def __init__(self, vectorstore, llm, embeddings, qdrant_client):
         self.vectorstore = vectorstore
         self.llm = llm
         self.embeddings = embeddings
         self.qdrant_client = qdrant_client
-        self.prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)    
+        self.prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
+        # 코드 → 시트명 매핑 캐시 (시작 시 Qdrant에서 빌드)
+        self._code_sheet_map: dict = {}
+        self._build_code_sheet_map()
+
+    def _build_code_sheet_map(self):
+        """
+        Qdrant logistics_data에서 material_code 페이로드를 읽어
+        {코드: sheet_name} 매핑 딕셔너리를 빌드.
+        코드만으로 자재 종류(시트) 자동 판별에 사용.
+        """
+        try:
+            offset = None
+            batch_size = 500
+            while True:
+                result = self.qdrant_client.scroll(
+                    collection_name=QDRANT_COLLECTION,
+                    scroll_filter=models.Filter(
+                        must=[models.FieldCondition(
+                            key="material_code",
+                            match=models.MatchAny(any=["*"])   # 존재하는 것만
+                        )]
+                    ) if False else None,   # 필터 없이 전체 스캔
+                    limit=batch_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False
+                )
+                points, next_offset = result
+                for point in points:
+                    code = point.payload.get("material_code") or \
+                           point.payload.get("metadata", {}).get("material_code")
+                    sheet = point.payload.get("sheet_name") or \
+                            point.payload.get("metadata", {}).get("sheet_name", "")
+                    if code and sheet:
+                        self._code_sheet_map[str(code)] = sheet
+
+                if next_offset is None or len(points) < batch_size:
+                    break
+                offset = next_offset
+
+            logger.info(f"✅ 코드-시트 매핑 빌드 완료: {len(self._code_sheet_map)}개 코드")
+        except Exception as e:
+            logger.warning(f"코드-시트 매핑 빌드 실패 (fallback 사용): {e}")
+            self._code_sheet_map = {}
+
+    def _sheet_to_domain(self, sheet_name: str) -> Optional[str]:
+        """시트명 → 도메인 변환"""
+        for key, domain in self.SHEET_TO_DOMAIN.items():
+            if key in sheet_name:
+                return domain
+        return None
+
+    def _domain_from_code(self, code: str) -> Optional[str]:
+        """코드만으로 도메인 판별 (매핑 캐시 사용)"""
+        sheet = self._code_sheet_map.get(str(code))
+        if sheet:
+            return self._sheet_to_domain(sheet)
+        return None
     
     @lru_cache(maxsize=100)
     def extract_material_code(self, query: str) -> Optional[str]:
-        """자재코드 추출"""
+        """자재코드(7자리) 추출 - 한글 앞뒤 경계도 처리"""
         patterns = [
-            r'\b(\d{7})\b',
             r'자재코드[:\s]*(\d{7})',
             r'코드[:\s]*(\d{7})',
-            r'품번[:\s]*(\d{7})'
+            r'품번[:\s]*(\d{7})',
+            # 숫자 앞뒤로 숫자가 없는 경우 (한글/공백/문장부호 포함)
+            r'(?<![0-9])(\d{7})(?![0-9])',
         ]
-        
         for pattern in patterns:
             match = re.search(pattern, query)
             if match:
@@ -494,54 +570,84 @@ class RAGChainWrapper:
         return None
     
     def keyword_search_optimized(self, material_code: str, limit: int = 5):
-        """최적화된 키워드 검색 (필터 사용)"""
+        """
+        자재코드 필터 검색.
+        1차: 최상위 material_code 필터 (data_loader 최신 버전)
+        2차: metadata.material_code 필터 (구버전 호환)
+        """
+        points_found = []
         try:
-            search_result = self.qdrant_client.scroll(
+            # 1차: 최상위 키
+            result = self.qdrant_client.scroll(
                 collection_name=QDRANT_COLLECTION,
                 scroll_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="material_code",
-                            match=MatchValue(value=material_code)
-                        )
-                    ]
+                    must=[FieldCondition(key="material_code",
+                                        match=MatchValue(value=material_code))]
                 ),
-                limit=limit,
-                with_payload=True,
-                with_vectors=False
+                limit=limit, with_payload=True, with_vectors=False
             )
-            
-            points, _ = search_result
-            
-            matched_docs = []
-            for point in points:
-                payload = point.payload
-                matched_docs.append({
-                    'id': point.id,
-                    'content': payload.get('page_content', ''),
-                    'metadata': payload.get('metadata', {}),
-                    'score': 1.0
-                })
-            
-            logger.info(f"키워드 검색 (필터): {len(matched_docs)}개")
-            return matched_docs
-            
+            points_found = result[0]
         except Exception as e:
-            logger.error(f"키워드 검색 실패: {e}")
-            return []
+            logger.warning(f"1차 코드 검색 실패: {e}")
+
+        # 2차: metadata 중첩 키 (구버전)
+        if not points_found:
+            try:
+                result = self.qdrant_client.scroll(
+                    collection_name=QDRANT_COLLECTION,
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key="metadata.material_code",
+                                            match=MatchValue(value=material_code))]
+                    ),
+                    limit=limit, with_payload=True, with_vectors=False
+                )
+                points_found = result[0]
+            except Exception as e:
+                logger.warning(f"2차 코드 검색 실패: {e}")
+
+        matched_docs = []
+        for point in points_found:
+            payload = point.payload
+            matched_docs.append({
+                'id'      : point.id,
+                'content' : payload.get('page_content', ''),
+                'metadata': payload.get('metadata', {}),
+                'score'   : 1.0
+            })
+
+        logger.info(f"키워드 검색 [{material_code}]: {len(matched_docs)}개")
+        return matched_docs
         
     def _detect_domain(self, query: str, keyword_doc_content: str = "") -> str:
         """
-        질문 + 검색된 문서 내용을 기반으로 도메인 판별
-        반환값: 'conveyor' | 'crawler' | 'export' | 'driver_route' | 'general'
+        질문 + 검색된 문서 내용을 기반으로 도메인 판별.
+        자재코드가 있으면 코드-시트 매핑으로 우선 판별 (가장 정확).
+        반환값: 'conveyor' | 'sidewall' | 'crawler' | 'export' | 'driver_route' | 'general'
         """
         combined = query + " " + keyword_doc_content
 
-        # 지입기사 납품 동선 도메인 (우선 감지)
+        # ── 1순위: 코드-시트 매핑으로 정확한 판별 ──────────────────────
+        code = self.extract_material_code(query)
+        if code:
+            domain_from_code = self._domain_from_code(code)
+            if domain_from_code:
+                logger.info(f"코드 {code} → 도메인: {domain_from_code} (매핑 캐시)")
+                return domain_from_code
+
+        # ── 2순위: 키워드 기반 판별 ──────────────────────────────────────
+
+        # 지입기사 납품 동선 도메인
         driver_kw = ["지입기사", "납품 동선", "동선", "기사 노선", "납품 노선", "배달 경로",
-                     "김병일", "김영철", "이용구", "심효섭", "부산기사", "중부기사"]
+                     "김병일", "김영철", "이용구", "심효섭",
+                     "부산기사", "중부기사", "서울기사",
+                     "지입 기사", "납품경로", "납품코스"]
         if any(k in combined for k in driver_kw):
             return "driver_route"
+
+        # 주름혹벨트 도메인 (컨베어보다 먼저 체크 - ME SW 패턴)
+        sidewall_kw = ["주름혹", "sidewall", "SW ", "ME SW", "우든박스", "우드박스"]
+        if any(k in combined for k in sidewall_kw):
+            return "sidewall"
 
         # 컨베어벨트 도메인
         conveyor_kw = ["컨베어", "컨베이어", "직경", "롤", "NN", "EP", "포규격", "심체", "컨베어벨트"]
@@ -561,24 +667,53 @@ class RAGChainWrapper:
         return "general"
 
     def fetch_whole_docs(self, sheet_names: list, limit: int = 5):
-        """WHOLE/QA 전략으로 저장된 특정 시트 문서를 페이로드 필터로 가져옴"""
+        """WHOLE/QA 전략으로 저장된 특정 시트 문서를 페이로드 필터로 가져옴
+        - 최상위 sheet_name 필터 우선, 없으면 metadata.sheet_name 시도 (Qdrant 버전 호환)
+        """
         from langchain_core.documents import Document
         docs = []
         try:
             for sheet in sheet_names:
-                result = self.qdrant_client.scroll(
-                    collection_name=QDRANT_COLLECTION,
-                    scroll_filter=Filter(
-                        must=[FieldCondition(
-                            key="metadata.sheet_name",
-                            match=MatchValue(value=sheet)
-                        )]
-                    ),
-                    limit=limit,
-                    with_payload=True,
-                    with_vectors=False
-                )
-                for point in result[0]:
+                points_found = []
+
+                # 1차: 최상위 sheet_name 필터 (data_loader v2 이후)
+                try:
+                    result = self.qdrant_client.scroll(
+                        collection_name=QDRANT_COLLECTION,
+                        scroll_filter=Filter(
+                            must=[FieldCondition(
+                                key="sheet_name",
+                                match=MatchValue(value=sheet)
+                            )]
+                        ),
+                        limit=limit,
+                        with_payload=True,
+                        with_vectors=False
+                    )
+                    points_found = result[0]
+                except Exception:
+                    pass
+
+                # 2차: metadata.sheet_name 필터 (구버전 인덱스 호환)
+                if not points_found:
+                    try:
+                        result = self.qdrant_client.scroll(
+                            collection_name=QDRANT_COLLECTION,
+                            scroll_filter=Filter(
+                                must=[FieldCondition(
+                                    key="metadata.sheet_name",
+                                    match=MatchValue(value=sheet)
+                                )]
+                            ),
+                            limit=limit,
+                            with_payload=True,
+                            with_vectors=False
+                        )
+                        points_found = result[0]
+                    except Exception:
+                        pass
+
+                for point in points_found:
                     payload = point.payload
                     doc = Document(
                         page_content=payload.get('page_content', ''),
@@ -586,6 +721,9 @@ class RAGChainWrapper:
                     )
                     if doc.page_content:
                         docs.append((doc, 0.9))
+
+                logger.info(f"fetch_whole_docs [{sheet}]: {len(points_found)}개 조회")
+
         except Exception as e:
             logger.warning(f"WHOLE 문서 보완 실패: {e}")
         return docs
@@ -593,9 +731,10 @@ class RAGChainWrapper:
     # 도메인별 보완 시트 매핑
     DOMAIN_SUPPLEMENT_SHEETS = {
         "conveyor"     : ["컨베어벨트 직경 산출 수식"],
+        "sidewall"     : ["주름혹벨트 우든박스 사이즈 데이터"],  # 주름혹벨트 전용
         "crawler"      : ["차량 데이터"],
         "export"       : ["수출 포장량 산출 수식", "포장량 산출 데이터"],
-        "driver_route" : ["지입 차량(기사) 노선 데이터"],  # 지입기사 전체 노선
+        "driver_route" : ["지입 차량(기사) 노선 데이터"],
         "general"      : ["차량 데이터"],
     }
 
@@ -615,15 +754,29 @@ class RAGChainWrapper:
                     )
                     results.append((doc, result['score']))
 
-                # 도메인 판별 후 필요한 수식/규칙 문서 보완
+                # 코드-시트 매핑 우선, 없으면 문서 내용으로 도메인 판별
                 first_doc_content = keyword_results[0].get('content', '')
                 domain = self._detect_domain(query, first_doc_content)
-                supplement_sheets = self.DOMAIN_SUPPLEMENT_SHEETS.get(domain, ["차량 데이터"])
+                supplement_sheets = self.DOMAIN_SUPPLEMENT_SHEETS.get(domain, [])
 
-                whole_docs = self.fetch_whole_docs(supplement_sheets, limit=1)
-                results.extend(whole_docs)
-                logger.info(f"자재코드 검색: {len(keyword_results)}개 | 도메인: {domain} | 보완: {supplement_sheets} ({len(whole_docs)}개)")
+                if supplement_sheets:
+                    whole_docs = self.fetch_whole_docs(supplement_sheets, limit=1)
+                    results.extend(whole_docs)
+                    logger.info(f"코드 검색: {len(keyword_results)}개 | 도메인: {domain} | 보완: {supplement_sheets} ({len(whole_docs)}개)")
+                else:
+                    logger.info(f"코드 검색: {len(keyword_results)}개 | 도메인: {domain} | 보완 없음")
                 return results
+
+            else:
+                # Qdrant 필터 검색 실패 → 코드-시트 캐시로 도메인 판별 후 벡터 검색 보완
+                domain_from_code = self._domain_from_code(material_code)
+                if domain_from_code:
+                    logger.warning(f"코드 {material_code} Qdrant 조회 실패 → 도메인 {domain_from_code}로 벡터 검색 보완")
+                    supplement_sheets = self.DOMAIN_SUPPLEMENT_SHEETS.get(domain_from_code, [])
+                    if supplement_sheets:
+                        whole_docs = self.fetch_whole_docs(supplement_sheets, limit=3)
+                        results.extend(whole_docs)
+                # 결과가 없으면 아래 벡터 검색으로 fallback
 
         try:
             vector_results = self.vectorstore.similarity_search_with_score(query, k=50)
@@ -633,22 +786,51 @@ class RAGChainWrapper:
             else:
                 filtered_results = vector_results
 
-            # 지입기사 동선 질문이면 노선 전체 문서를 강제 보완 (누락 방지)
+            # 이미 results에 코드 기반 문서가 있으면 합산
+            if results:
+                existing = {doc.page_content[:50] for doc, _ in filtered_results}
+                for doc, score in results:
+                    if doc.page_content[:50] not in existing:
+                        filtered_results.insert(0, (doc, score))
+                        existing.add(doc.page_content[:50])
+
             domain = self._detect_domain(query)
+
+            # 자재코드 질문인데 벡터 결과만 있는 경우 → 해당 도메인 시트 문서 강제 보완
+            if material_code and domain not in ("driver_route", "general"):
+                supplement_sheets = self.DOMAIN_SUPPLEMENT_SHEETS.get(domain, [])
+                if supplement_sheets:
+                    existing = {doc.page_content[:50] for doc, _ in filtered_results}
+                    extra = self.fetch_whole_docs(supplement_sheets, limit=2)
+                    for doc, score in extra:
+                        if doc.page_content[:50] not in existing:
+                            filtered_results.append((doc, score))
+                    logger.info(f"코드 벡터 fallback 보완: 도메인={domain}, +{len(extra)}개")
+
+            # 지입기사 납품 동선 질문이면 노선 전체 문서를 강제 보완
             if domain == "driver_route":
                 driver_docs = self.fetch_whole_docs(["지입 차량(기사) 노선 데이터"], limit=10)
-                # 이미 포함된 문서는 중복 제거
-                existing_contents = {doc.page_content[:50] for doc, _ in filtered_results}
-                for doc, score in driver_docs:
-                    if doc.page_content[:50] not in existing_contents:
-                        filtered_results.append((doc, score))
-                logger.info(f"지입기사 노선 보완: {len(driver_docs)}개 추가")
+                if driver_docs:
+                    filtered_results = driver_docs
+                    logger.info(f"지입기사 노선 전용 컨텍스트: {len(driver_docs)}개")
+                else:
+                    driver_kw = ["지입", "기사", "노선", "납품", "동선"]
+                    driver_filtered = [
+                        (doc, score) for doc, score in filtered_results
+                        if any(kw in doc.page_content for kw in driver_kw)
+                        or "지입 차량" in doc.metadata.get("sheet_name", "")
+                    ]
+                    if driver_filtered:
+                        filtered_results = driver_filtered
+                        logger.info(f"지입기사 벡터 결과 필터링: {len(driver_filtered)}개")
+                    else:
+                        logger.warning("지입기사 노선 문서 조회 실패 — 벡터 검색 전체 결과 사용")
 
             logger.info(f"벡터 검색 결과 확보: {len(filtered_results)}개")
             return filtered_results
         except Exception as e:
             logger.error(f"벡터 검색 실패: {e}")
-            return []
+            return results if results else []
           
 class LoggingSystem:
     """질문/답변 로깅 시스템"""
@@ -1032,6 +1214,141 @@ def build_conversation_context(context_history: List[Dict]) -> str:
     return context_str
 
 
+def _format_driver_route_answer(query: str, context_text: str) -> str:
+    """
+    지입기사 납품 동선 답변을 Python에서 직접 구조화 포맷팅.
+    LLM에 의존하지 않으므로 타임아웃/누락 없이 100% 안정적으로 동작.
+    """
+    import re as _re
+
+    # ── 1. 소속 범위 감지 ────────────────────────────────────────────────
+    scope_busan   = any(k in query for k in ["부산", "부산공장", "부산 기사"])
+    scope_seoul   = any(k in query for k in ["서울", "중부", "중부물류", "수도권"])
+    specific_name = next((n for n in ["김병일", "김영철", "이용구", "심효섭"] if n in query), None)
+
+    # ── 2. context_text에서 기사별 블록 파싱 ────────────────────────────
+    # sheet_to_driver_route_doc이 생성한 마크다운 표 구조 파싱
+    # "## 기사명" 으로 시작하는 블록을 분리
+    driver_blocks: dict = {}   # {기사명: [(요일, 동선), ...]}
+    current_driver = None
+
+    for line in context_text.split('\n'):
+        # "## 김병일 기사 (부산공장 지입기사)" 패턴
+        h2 = _re.match(r'^##\s+(.+)', line.strip())
+        if h2:
+            current_driver = h2.group(1).strip()
+            driver_blocks[current_driver] = []
+            continue
+        # 표 데이터 행: "| 월요일 | ... |"
+        if current_driver and line.strip().startswith('|') and '---' not in line:
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            if len(cells) >= 2 and cells[0] not in ('요일', ''):
+                driver_blocks[current_driver].append((cells[0], cells[1]))
+
+    # 파싱 실패 시 (구 GROUP 문서 형태) → 원본 컨텍스트 그대로 반환
+    if not driver_blocks:
+        return context_text
+
+    # ── 3. 소속별 그룹 분류 ──────────────────────────────────────────────
+    BUSAN_DRIVERS  = ["김병일", "김영철"]
+    SEOUL_DRIVERS  = ["이용구", "심효섭"]
+
+    # 기사 연락처/차량 정보 (물류팀 운영 규칙 QA에서 하드코딩 → 별도 시트 추가 시 확장)
+    DRIVER_INFO = {
+        "김병일": {"tel": "010-3587-4581", "car": "3.5톤 카고", "area": "부산·경남권"},
+        "김영철": {"tel": "010-7123-6231", "car": "1톤 카고",   "area": "울산·마산·창원권"},
+        "이용구": {"tel": "010-9263-4190", "car": "2.5톤 카고", "area": "서울·경기권"},
+        "심효섭": {"tel": "010-5291-6593", "car": "2.5톤 카고", "area": "서울·경기권"},
+    }
+
+    def _get_info(name_key: str) -> dict:
+        """기사 블록 키에서 이름만 추출해 INFO 조회"""
+        for k, v in DRIVER_INFO.items():
+            if k in name_key:
+                return {"short": k, **v}
+        return {"short": name_key, "tel": "-", "car": "-", "area": "-"}
+
+    def _should_include(driver_key: str) -> bool:
+        info = _get_info(driver_key)
+        short = info["short"]
+        if specific_name:
+            return specific_name in short
+        if scope_busan and not scope_seoul:
+            return short in BUSAN_DRIVERS
+        if scope_seoul and not scope_busan:
+            return short in SEOUL_DRIVERS
+        return True  # 전원
+
+    # ── 4. 답변 포맷팅 ───────────────────────────────────────────────────
+    lines = []
+
+    # 도입 멘트
+    if specific_name:
+        lines.append(f"**{specific_name} 기사**의 납품 동선 정보입니다.\n")
+    elif scope_busan and not scope_seoul:
+        lines.append("**부산공장 지입기사** 납품 동선 정보입니다.\n")
+    elif scope_seoul and not scope_busan:
+        lines.append("**서울(중부물류센터) 지입기사** 납품 동선 정보입니다.\n")
+    else:
+        lines.append("지입기사 전원의 납품 동선 정보입니다.\n")
+
+    # 소속별 그룹 출력
+    groups = []
+    if not (scope_seoul and not scope_busan):   # 부산 포함
+        groups.append(("🚚 부산공장 지입기사", BUSAN_DRIVERS))
+    if not (scope_busan and not scope_seoul):   # 서울 포함
+        groups.append(("🚌 서울(중부물류센터) 지입기사", SEOUL_DRIVERS))
+
+    for group_title, name_list in groups:
+        group_drivers = [
+            (dk, dv) for dk, dv in driver_blocks.items()
+            if any(n in dk for n in name_list) and _should_include(dk)
+        ]
+        if not group_drivers:
+            continue
+
+        lines.append(f"## {group_title}\n")
+
+        for driver_key, routes in group_drivers:
+            info = _get_info(driver_key)
+            lines.append(f"### {info['short']} 기사")
+            lines.append(f"- 📱 연락처: {info['tel']}  |  🚛 차량: {info['car']}  |  📍 담당 권역: {info['area']}")
+            lines.append("- 운행: **주 5일 (월~금) 매일 운행**\n")
+
+            if routes:
+                lines.append("| 요일 | 납품 동선 (거래처 · 도착 예정시간) |")
+                lines.append("|:----:|:----------------------------------|")
+                for day, dest in routes:
+                    # 납품처가 많으면 줄을 나눠 읽기 편하게 번호 붙이기
+                    stops = [s.strip() for s in dest.replace(' / ', '/').split('/') if s.strip()]
+                    if len(stops) <= 3:
+                        dest_fmt = "  →  ".join(stops)
+                    else:
+                        # 4개 이상이면 2줄로 분리
+                        mid = (len(stops) + 1) // 2
+                        row1 = "  →  ".join(stops[:mid])
+                        row2 = "  →  ".join(stops[mid:])
+                        dest_fmt = f"{row1}<br>↪ {row2}"
+                    lines.append(f"| {day} | {dest_fmt} |")
+                lines.append("")
+            else:
+                lines.append("_동선 데이터 없음_\n")
+
+    # 특이사항 (물류팀 운영 규칙에서 하드코딩)
+    if not specific_name:
+        lines.append("---")
+        lines.append("**💡 운행 특이사항**")
+        if not (scope_seoul and not scope_busan):
+            lines.append("- 부산공장 기사: 미성폴리머(김해)/신항 등 추가 운행은 대부분 첫 운행, 점심 이후 추가 운행 불가")
+        if not (scope_busan and not scope_seoul):
+            lines.append("- 서울 기사: 격주 단위로 동선 변경하여 운행")
+        lines.append("")
+
+    lines.append("📞 납품 일정 변경·추가 문의는 **물류팀 담당자**에게 연락해 주세요.")
+
+    return "\n".join(lines)
+
+
 def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: LearningSystem, 
                  logging_system: LoggingSystem, context: List[Dict] = None) -> Tuple[str, List[Dict], bool]:
     """쿼리 처리"""
@@ -1073,17 +1390,36 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
     search_k = 7
     list_keywords = ["몇 개", "전부", "목록", "리스트", "어디"]
     if any(kw in query for kw in list_keywords):
-        search_k = 15 # 목록 질문 시 더 넓게 검색
-    
+        search_k = 15
+
+    # 웹서치를 허용할 명시적 키워드 (사내 데이터에 없는 외부 정보가 필요한 경우)
+    WEB_ALLOWED_KW = [
+        "최신", "뉴스", "시세", "환율", "날씨", "법률", "규정", "관세",
+        "HS코드", "incoterms", "인코텀즈", "선적 서류", "수출 서류",
+        "B/L", "invoice", "packing list", "원산지증명", "세관"
+    ]
+    _allow_web = any(kw.lower() in query.lower() for kw in WEB_ALLOWED_KW)
+
     try:
-        # logistics_data에서 검색
         filtered_docs = rag_chain.hybrid_search(query, k=search_k)
 
-        # 문서가 1개라도 있으면 RAG 시도 (기존 < 2 조건이 웹서치 강제 유발)
         if not filtered_docs:
-            use_web_search = True
+            # 로컬 문서 없을 때: 웹서치 허용 키워드 있으면 웹서치, 없으면 LLM 자체 지식으로 답변
+            if _allow_web:
+                use_web_search = True
+            else:
+                # LLM 자체 지식으로 답변 시도
+                fallback_prompt = rag_chain.prompt_template.format(
+                    context="관련 내부 데이터가 없습니다. 일반 물류 지식을 바탕으로 답변하세요.",
+                    input=query,
+                    history_context=history_context if history_context else "없음",
+                    conversation_context=conversation_context if conversation_context else "없음"
+                )
+                try:
+                    answer = rag_chain.llm._call(fallback_prompt)
+                except Exception:
+                    answer = "해당 정보를 내부 데이터에서 찾을 수 없습니다. 담당자에게 직접 문의해 주세요."
         else:
-            # [문서 N] 태그 없이 순수 내용만 연결
             context_text = "\n\n---\n\n".join([
                 doc.page_content
                 for doc, _ in filtered_docs
@@ -1101,65 +1437,95 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
                 'page': doc.metadata.get('page', 'N/A')
             } for doc, score in filtered_docs]
 
-            if len(context_text) > 4000:
-                context_text = context_text[:4000] + "\n..."
+            _domain_for_limit = rag_chain._detect_domain(query)
+            _ctx_limit = 8000 if _domain_for_limit == "driver_route" else 4000
+            if len(context_text) > _ctx_limit:
+                context_text = context_text[:_ctx_limit] + "\n..."
 
             if is_table_request:
                 has_table = True
 
-            # 프롬프트 생성 (템플릿 변수와 일치)
-            formatted_prompt = rag_chain.prompt_template.format(
-                context=context_text,
-                input=query,
-                history_context=history_context if history_context else "없음",
-                conversation_context=conversation_context if conversation_context else "없음"
-            )
-
-            answer = rag_chain.llm._call(formatted_prompt)
+            # ── driver_route: Python 직접 포맷팅 ──
+            if _domain_for_limit == "driver_route":
+                answer = _format_driver_route_answer(query, context_text)
+                has_table = True
+            else:
+                formatted_prompt = rag_chain.prompt_template.format(
+                    context=context_text,
+                    input=query,
+                    history_context=history_context if history_context else "없음",
+                    conversation_context=conversation_context if conversation_context else "없음"
+                )
+                answer = rag_chain.llm._call(formatted_prompt)
 
             if "|" in answer and "---" in answer:
                 has_table = True
 
-            # 웹서치 fallback 조건 강화: 명백히 빈 답변일 때만
-            # "정보가 없습니다" 등 포함해도 RAG 답변으로 반환 (웹서치보다 내부 데이터 우선)
-            if not answer or len(answer.strip()) < 20:
+            # 웹서치 전환 조건: 답변이 완전히 비어있고 + 웹허용 키워드 있을 때만
+            if (not answer or len(answer.strip()) < 10) and _allow_web:
                 use_web_search = True
-            
+
     except Exception as e:
-        logger.error(f"검색 실패: {e}")
-        use_web_search = True
+        import traceback
+        logger.error(f"RAG 검색/답변 실패: {e}\n{traceback.format_exc()}")
+        # 예외 발생 시에도 웹서치 허용 키워드 없으면 웹서치 건너뜀
+        if _allow_web:
+            use_web_search = True
+        else:
+            answer = "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
     
-    # 웹 검색
+    # 웹 검색 (WEB_ALLOWED_KW에 해당하는 질문만 여기 도달)
     if use_web_search:
+        logger.info(f"🌐 웹서치 발동: '{query[:40]}' (허용 키워드 매칭)")
+
+        # driver_route는 Python 포맷팅으로 처리되므로 여기 도달하면 안 됨 (안전망)
+        _domain_check = rag_chain._detect_domain(query)
+        if _domain_check == "driver_route":
+            _test_docs = rag_chain.fetch_whole_docs(["지입 차량(기사) 노선 데이터"], limit=1)
+            if _test_docs:
+                return (
+                    "지입기사 납품 동선 데이터는 찾았으나 답변 생성 중 오류가 발생했습니다.\n\n"
+                    "잠시 후 다시 시도해 주세요.",
+                    [], False
+                )
+            else:
+                return (
+                    "지입기사 납품 동선 데이터를 Qdrant에서 찾을 수 없습니다.\n\n"
+                    "`python data_loader.py`로 재인덱싱 후 다시 질문해 주세요.",
+                    [], False
+                )
+
         web_context = search_ddg(query)
         sources = [{'name': 'Web Search', 'score': 0.5, 'page': 'N/A'}]
         
         if web_context:
-            enhanced_prompt = f"""웹 검색 결과:
+            enhanced_prompt = f"""당신은 DRB 물류 전문 AI 어시스턴트입니다.
+아래 웹 검색 결과를 참고하여 질문에 답변하세요.
+내부 데이터에 없는 내용이므로 웹 검색 결과를 바탕으로 친절하게 안내하세요.
 
+[웹 검색 결과]
 {web_context}
 
-{conversation_context}
-
-{history_context}
-
-질문: {query}
+[질문]
+{query}
 
 {"⚠️ 표 형식으로 작성하세요." if is_table_request else ""}
 
 답변:
 """
             try:
-                answer = rag_chain.llm._call(enhanced_prompt)
+                orig_timeout = rag_chain.llm.timeout
+                rag_chain.llm.timeout = 120
+                answer = rag_chain.llm._call_with_max_tokens(enhanced_prompt, max_tokens=3000)
+                rag_chain.llm.timeout = orig_timeout
                 answer += "\n\n🌐 웹 검색 기반"
-                
                 if "|" in answer and "---" in answer:
                     has_table = True
-                    
             except Exception as e:
-                answer = "답변 생성 실패"
+                logger.error(f"웹서치 LLM 호출 실패: {e}")
+                answer = "답변 생성에 실패했습니다. 잠시 후 다시 시도해 주세요."
         else:
-            answer = "정보를 찾을 수 없습니다."
+            answer = "관련 정보를 찾을 수 없습니다. 담당자에게 직접 문의해 주세요."
     
     # learning_history에 저장
     learning_system.save_interaction(query, answer, sources)

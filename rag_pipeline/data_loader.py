@@ -393,9 +393,15 @@ def batch_embed_and_index(chunks, embeddings, client, collection_name, batch_siz
                     models.PointStruct(
                         id=make_hash(c.page_content, str(start + i)),
                         vector=v,
-                        payload={"page_content": c.page_content, "metadata": c.metadata,
-                                 **({"material_code": c.metadata["material_code"]}
-                                    if c.metadata.get("material_code") else {})}
+                        payload={
+                            "page_content": c.page_content,
+                            "metadata": c.metadata,
+                            # 최상위에도 저장 → Qdrant 버전 무관하게 필터 조회 안정
+                            "sheet_name": c.metadata.get("sheet_name", ""),
+                            "strategy":   c.metadata.get("strategy", ""),
+                            **({"material_code": c.metadata["material_code"]}
+                               if c.metadata.get("material_code") else {})
+                        }
                     )
                     for i, (c, v) in enumerate(zip(batch, vectors))
                 ]

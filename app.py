@@ -1037,11 +1037,13 @@ with st.sidebar:
                     st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
                     st.write(f"📦 **최대 적재 가능:** {best_truck['max_plt']} PLT")
 
-                    # 컨테이너 기준: 20ft(10 PLT), 40ft(20 PLT)
-                    if calc_pallets <= 10:
-                        cntr_type, max_cntr_plt = "20ft", 10
+                    # 컨테이너 기준: 1PLT=1.1×1.1×2.2m=2.662CBM
+                    # 20ft(33.1CBM→12PLT), 40ft(67.5CBM→25PLT)
+                    _PLT_CBM = 1.1 * 1.1 * 2.2
+                    if calc_pallets <= int(33.1 // _PLT_CBM):  # 12 PLT
+                        cntr_type, max_cntr_plt = "20ft", int(33.1 // _PLT_CBM)
                     else:
-                        cntr_type, max_cntr_plt = "40ft", 20
+                        cntr_type, max_cntr_plt = "40ft", int(67.5 // _PLT_CBM)
 
                     cntr_count = int(
                         (calc_pallets // max_cntr_plt) +
