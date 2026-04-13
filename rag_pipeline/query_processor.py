@@ -140,6 +140,39 @@ PROMPT_TEMPLATE = """당신은 DRB 물류 전문 AI 어시스턴트입니다.
     ② 자재내역(제품명), 자재그룹, 중량 등 기본 정보 먼저 제시
     ③ 질문에 "중량", "적재", "배차", "직경" 등 추가 키워드가 있으면 해당 계산도 함께 수행
     ④ 시트 구분 없이 코드만으로 모든 정보를 제공할 수 있음을 전제로 답변하세요.
+
+14. **전동 수출 파렛트 CBM 계산 규칙**: 'CBM', '파렛트 부피', '수출 CBM' 관련 질문은
+    반드시 아래 확정값을 사용하세요. 임의로 계산하거나 다른 수치를 사용하지 마세요.
+
+    [전동수출 파렛트 CBM 확정값 — 물류팀 운영 규칙]
+    - 파렛트 1개 규격: 가로 1.1m × 세로 1.1m × 높이 2.2m = **2.662 CBM**
+    - N파렛트 CBM = 2.662 × N
+    - 예시: 8파렛트 = 2.662 × 8 = **21.296 CBM**
+
+    [답변 형식]
+    | 항목 | 값 |
+    |------|-----|
+    | 파렛트 규격 | 1,100 × 1,100 × 2,200 mm |
+    | 파렛트 1개 CBM | 2.662 CBM |
+    | 파렛트 수량 | N PLT |
+    | 총 CBM | 2.662 × N = OO.OOO CBM |
+
+15. **국내 출고 운송 방식 판단 규칙**: '직송', '화물', '택배', '출고' 키워드 포함 시
+    자재코드로 1PC당 중량 확인 → 총 중량 계산 → 도착지 구간 기준 적용.
+    웹 검색 절대 사용 금지.
+    - 부산시내: 150kg 이하 화물/택배, 초과 직송
+    - 녹산·대저·명지·경남권: 300kg 이하 화물/택배, 초과 직송
+    - 서울·광주·대구 등 장거리: 800kg 이하 화물/택배, 초과 직송
+
+16. **박스 적재량 및 파렛트 사이즈 규칙**: '몇 박스', '1파렛트당', 'PLT당 적재' 관련 질문은
+    [물류팀 운영 규칙]을 1순위로 참조. [파렛트, 박스 데이터] 시트와 절대 혼용 금지.
+    - 600박스: 1PLT당 8박스 / 파렛트 1,200×800×730mm / 패키징 1,200×800×1,460mm
+    - 650박스: 1PLT당 20박스 / 파렛트 1,100×1,100×2,200mm
+    - 1090박스: 1PLT당 4박스 / 파렛트 1,100×1,100×1,110mm / 패키징 1,100×1,100×2,220mm
+
+17. **수출 컨테이너 선택 규칙**: '컨테이너', '20ft', '40ft' 관련 질문은
+    혼합 조합(40ft+20ft)도 함께 제시하고 잔여 공간 최소 조합을 최적 추천.
+    - 20ft: 최대 10PLT / 40ft: 최대 20PLT (파렛트 1.1×1.1m, 1단 적재)
 답변:"""
 
 class EmailNotifier:
@@ -622,9 +655,18 @@ class RAGChainWrapper:
         """
         질문 + 검색된 문서 내용을 기반으로 도메인 판별.
         자재코드가 있으면 코드-시트 매핑으로 우선 판별 (가장 정확).
-        반환값: 'conveyor' | 'sidewall' | 'crawler' | 'export' | 'driver_route' | 'general'
+        단, 운송방식 키워드가 함께 있으면 domestic 우선 적용.
+        반환값: 'conveyor' | 'sidewall' | 'crawler' | 'export' | 'domestic' | 'driver_route' | 'general'
         """
         combined = query + " " + keyword_doc_content
+
+        # ── 0순위: 국내 운송방식 키워드 — 자재코드 유무와 무관하게 최우선 ──
+        # "출고", "운송방식", "직송", "화물", "택배" 가 있으면 물류팀 운영 규칙이 필요
+        domestic_kw = ["운송방식", "직송", "화물", "택배", "출고", "국내 출고", "운송 방식",
+                       "어떤 운송", "운반 방법", "배송 방법", "배송방법", "운반방법"]
+        if any(k in query for k in domestic_kw):
+            logger.info(f"운송방식 키워드 감지 → 도메인: domestic")
+            return "domestic"
 
         # ── 1순위: 코드-시트 매핑으로 정확한 판별 ──────────────────────
         code = self.extract_material_code(query)
@@ -659,8 +701,9 @@ class RAGChainWrapper:
         if any(k in combined for k in crawler_kw):
             return "crawler"
 
-        # 수출 포장 도메인
-        export_kw = ["박스", "포장량", "컨테이너", "B01", "B02", "N18", "N19", "마대", "우든"]
+        # 수출 포장 도메인 (CBM/파렛트 계산 포함)
+        export_kw = ["박스", "포장량", "컨테이너", "B01", "B02", "N18", "N19", "마대", "우든",
+                     "CBM", "cbm", "Pallet", "파렛트", "전동수출", "수출 파렛트"]
         if any(k in combined for k in export_kw):
             return "export"
 
@@ -731,11 +774,13 @@ class RAGChainWrapper:
     # 도메인별 보완 시트 매핑
     DOMAIN_SUPPLEMENT_SHEETS = {
         "conveyor"     : ["컨베어벨트 직경 산출 수식"],
-        "sidewall"     : ["주름혹벨트 우든박스 사이즈 데이터"],  # 주름혹벨트 전용
+        "sidewall"     : ["주름혹벨트 우든박스 사이즈 데이터"],
         "crawler"      : ["차량 데이터"],
-        "export"       : ["수출 포장량 산출 수식", "포장량 산출 데이터"],
+        "domestic"     : ["물류팀 운영 규칙", "용차 차량 노선 데이터", "차량 데이터"],
+        # export·general 모두 물류팀 운영 규칙 포함 — CBM/컨테이너/운임 계산 데이터 확보
+        "export"       : ["수출 포장량 산출 수식", "포장량 산출 데이터", "물류팀 운영 규칙"],
         "driver_route" : ["지입 차량(기사) 노선 데이터"],
-        "general"      : ["차량 데이터"],
+        "general"      : ["차량 데이터", "물류팀 운영 규칙"],
     }
 
     def hybrid_search(self, query: str, k: int = 50):
@@ -757,10 +802,21 @@ class RAGChainWrapper:
                 # 코드-시트 매핑 우선, 없으면 문서 내용으로 도메인 판별
                 first_doc_content = keyword_results[0].get('content', '')
                 domain = self._detect_domain(query, first_doc_content)
-                supplement_sheets = self.DOMAIN_SUPPLEMENT_SHEETS.get(domain, [])
+                supplement_sheets = list(self.DOMAIN_SUPPLEMENT_SHEETS.get(domain, []))
+
+                # ★ domestic 도메인: 자재코드 기반 도메인 시트도 추가 보완
+                #   (운송방식 판단에는 물류팀 운영 규칙 + 자재 중량 데이터 모두 필요)
+                if domain == "domestic":
+                    code_domain = self._domain_from_code(material_code)
+                    if code_domain:
+                        extra_sheets = self.DOMAIN_SUPPLEMENT_SHEETS.get(code_domain, [])
+                        for s in extra_sheets:
+                            if s not in supplement_sheets:
+                                supplement_sheets = [s] + supplement_sheets
+                    logger.info(f"domestic 보완 시트 (자재+운송): {supplement_sheets}")
 
                 if supplement_sheets:
-                    whole_docs = self.fetch_whole_docs(supplement_sheets, limit=1)
+                    whole_docs = self.fetch_whole_docs(supplement_sheets, limit=2)
                     results.extend(whole_docs)
                     logger.info(f"코드 검색: {len(keyword_results)}개 | 도메인: {domain} | 보완: {supplement_sheets} ({len(whole_docs)}개)")
                 else:
@@ -772,7 +828,13 @@ class RAGChainWrapper:
                 domain_from_code = self._domain_from_code(material_code)
                 if domain_from_code:
                     logger.warning(f"코드 {material_code} Qdrant 조회 실패 → 도메인 {domain_from_code}로 벡터 검색 보완")
-                    supplement_sheets = self.DOMAIN_SUPPLEMENT_SHEETS.get(domain_from_code, [])
+                    supplement_sheets = list(self.DOMAIN_SUPPLEMENT_SHEETS.get(domain_from_code, []))
+                    # ★ domestic 도메인이면 물류팀 운영 규칙도 추가
+                    detected = self._detect_domain(query)
+                    if detected == "domestic":
+                        for s in self.DOMAIN_SUPPLEMENT_SHEETS.get("domestic", []):
+                            if s not in supplement_sheets:
+                                supplement_sheets.append(s)
                     if supplement_sheets:
                         whole_docs = self.fetch_whole_docs(supplement_sheets, limit=3)
                         results.extend(whole_docs)
@@ -1173,6 +1235,9 @@ def format_answer(answer: str) -> str:
         line = re.sub(r'^\s*\*\*\([^)]+\)\*\*\s*', '', line)
         # 줄 중간에 **텍스트:** 형태도 텍스트만 남김 (콜론 포함)
         line = re.sub(r'\*\*([^*]+):\*\*', r'\1:', line)
+        # 나머지 모든 **텍스트** → 텍스트만 남김 (** 특수문자 화면 노출 방지)
+        # 표/헤더 줄은 이미 위에서 continue 처리됐으므로 여기선 일반 텍스트만 대상
+        line = re.sub(r'\*\*([^*\n]+)\*\*', r'\1', line)
         cleaned.append(line)
     answer = '\n'.join(cleaned)
 
@@ -1216,75 +1281,312 @@ def build_conversation_context(context_history: List[Dict]) -> str:
 
 def _format_driver_route_answer(query: str, context_text: str) -> str:
     """
-    지입기사 납품 동선 답변을 Python에서 직접 구조화 포맷팅.
-    LLM에 의존하지 않으므로 타임아웃/누락 없이 100% 안정적으로 동작.
+    지입기사 납품 동선 답변 - Python 직접 포맷팅 (LLM 미사용).
+
+    기능:
+    (1) 동일 노선 요일 자동 묶기 (월~금 → "월~금 (매일)")
+    (2) 서울 기사(이용구/심효섭) 격주 노선 교대
+        - 이번 주 운행 기사 노선 먼저, 다음 주 기사 노선은 아래에 참고용 표시
+    (3) "현재 위치/지금 어디" 질문: 현재 시각으로 예상 위치 계산
     """
     import re as _re
+    from datetime import date as _date, datetime as _dt
 
-    # ── 1. 소속 범위 감지 ────────────────────────────────────────────────
+    # ── 0. 현재 위치 조회 요청 감지 ─────────────────────────────────────
+    LOCATION_KW = ["현재 위치", "지금 어디", "현재 어디", "어디 있", "몇 시에", "지금 위치",
+                   "예상 위치", "현재위치", "지금쯤", "어디쯤"]
+    is_location_query = any(k in query for k in LOCATION_KW)
+
+    # ── 1. 소속/이름 범위 감지 ────────────────────────────────────────────
     scope_busan   = any(k in query for k in ["부산", "부산공장", "부산 기사"])
     scope_seoul   = any(k in query for k in ["서울", "중부", "중부물류", "수도권"])
     specific_name = next((n for n in ["김병일", "김영철", "이용구", "심효섭"] if n in query), None)
 
-    # ── 2. context_text에서 기사별 블록 파싱 ────────────────────────────
-    # sheet_to_driver_route_doc이 생성한 마크다운 표 구조 파싱
-    # "## 기사명" 으로 시작하는 블록을 분리
-    driver_blocks: dict = {}   # {기사명: [(요일, 동선), ...]}
-    current_driver = None
+    # ── 2. 격주 운행 판별 ────────────────────────────────────────────────
+    # 기준: 2025년 1월 6일(월) = 이용구 노선 운행 1주차
+    # 홀수 주(0,2,4...) → 이용구 노선 운행주, 짝수 주(1,3,5...) → 심효섭 노선 운행주
+    _BASE_MONDAY      = _date(2025, 1, 6)
+    _today            = _date.today()
+    _week_elapsed     = ((_today - _BASE_MONDAY).days) // 7
+    _this_week_driver = "이용구" if _week_elapsed % 2 == 0 else "심효섭"
+    _next_week_driver = "심효섭" if _week_elapsed % 2 == 0 else "이용구"
 
+    # ── 3. context_text 파싱 ─────────────────────────────────────────────
+    driver_blocks: dict = {}
+    current_driver = None
     for line in context_text.split('\n'):
-        # "## 김병일 기사 (부산공장 지입기사)" 패턴
         h2 = _re.match(r'^##\s+(.+)', line.strip())
         if h2:
             current_driver = h2.group(1).strip()
             driver_blocks[current_driver] = []
             continue
-        # 표 데이터 행: "| 월요일 | ... |"
         if current_driver and line.strip().startswith('|') and '---' not in line:
             cells = [c.strip() for c in line.strip().strip('|').split('|')]
             if len(cells) >= 2 and cells[0] not in ('요일', ''):
                 driver_blocks[current_driver].append((cells[0], cells[1]))
 
-    # 파싱 실패 시 (구 GROUP 문서 형태) → 원본 컨텍스트 그대로 반환
     if not driver_blocks:
         return context_text
 
-    # ── 3. 소속별 그룹 분류 ──────────────────────────────────────────────
-    BUSAN_DRIVERS  = ["김병일", "김영철"]
-    SEOUL_DRIVERS  = ["이용구", "심효섭"]
-
-    # 기사 연락처/차량 정보 (물류팀 운영 규칙 QA에서 하드코딩 → 별도 시트 추가 시 확장)
-    DRIVER_INFO = {
+    # ── 4. 기본 정보 ─────────────────────────────────────────────────────
+    BUSAN_DRIVERS = ["김병일", "김영철"]
+    SEOUL_DRIVERS = ["이용구", "심효섭"]
+    DAY_ORDER     = {"월요일": 0, "화요일": 1, "수요일": 2, "목요일": 3, "금요일": 4}
+    DRIVER_INFO   = {
         "김병일": {"tel": "010-3587-4581", "car": "3.5톤 카고", "area": "부산·경남권"},
         "김영철": {"tel": "010-7123-6231", "car": "1톤 카고",   "area": "울산·마산·창원권"},
-        "이용구": {"tel": "010-9263-4190", "car": "2.5톤 카고", "area": "서울·경기권"},
-        "심효섭": {"tel": "010-5291-6593", "car": "2.5톤 카고", "area": "서울·경기권"},
+        "이용구": {"tel": "010-9263-4190", "car": "2.5톤 카고", "area": "서울·경기·인천권"},
+        "심효섭": {"tel": "010-5291-6593", "car": "2.5톤 카고", "area": "서울 도심권"},
     }
 
     def _get_info(name_key: str) -> dict:
-        """기사 블록 키에서 이름만 추출해 INFO 조회"""
         for k, v in DRIVER_INFO.items():
             if k in name_key:
                 return {"short": k, **v}
         return {"short": name_key, "tel": "-", "car": "-", "area": "-"}
 
     def _should_include(driver_key: str) -> bool:
-        info = _get_info(driver_key)
-        short = info["short"]
+        short = _get_info(driver_key)["short"]
         if specific_name:
             return specific_name in short
         if scope_busan and not scope_seoul:
             return short in BUSAN_DRIVERS
         if scope_seoul and not scope_busan:
             return short in SEOUL_DRIVERS
-        return True  # 전원
+        return True
 
-    # ── 4. 답변 포맷팅 ───────────────────────────────────────────────────
+    # ── 5. 동일 노선 요일 묶기 ───────────────────────────────────────────
+    def _compress_routes(routes: list) -> list:
+        if not routes:
+            return []
+        sorted_r = sorted(routes, key=lambda x: DAY_ORDER.get(x[0], 99))
+        dest_map: dict = {}
+        for day, dest in sorted_r:
+            key = _re.sub(r'\s+', ' ', dest.strip())
+            dest_map.setdefault(key, []).append(day)
+
+        compressed = []
+        for dest_key, days in dest_map.items():
+            days_s = sorted(days, key=lambda d: DAY_ORDER.get(d, 99))
+            idxs   = [DAY_ORDER.get(d, 99) for d in days_s]
+            consec = all(idxs[i+1]-idxs[i]==1 for i in range(len(idxs)-1))
+
+            if len(days_s) == 5:
+                label = "**월~금 (매일)**"
+            elif consec and len(days_s) >= 3:
+                label = f"**{days_s[0][:1]}~{days_s[-1][:1]}요일**"
+            elif consec and len(days_s) == 2:
+                label = f"**{'·'.join(d[:1] for d in days_s)}요일**"
+            else:
+                label = "**" + "·".join(d[:1]+"요일" for d in days_s) + "**"
+
+            compressed.append((label, dest_key))
+
+        def _first_idx(item):
+            lbl = item[0].replace("*","")
+            for d, i in DAY_ORDER.items():
+                if d[:1] in lbl:
+                    return i
+            return 99
+        compressed.sort(key=_first_idx)
+        return compressed
+
+    # ── 6. 납품 동선 포맷팅 ──────────────────────────────────────────────
+    def _is_sequential(dest_raw: str) -> bool:
+        """
+        납품처들이 순차 납품인지 분기(주문건수에 따라 변동)인지 판별.
+        시간이 모두 다르고 단조 증가하면 순차, 동일 시간 존재 시 분기.
+        """
+        items = [s.strip() for s in dest_raw.replace('\n',' / ').split(' / ') if s.strip()]
+        times = []
+        for item in items:
+            m = _re.search(r'\((\d{1,2})시(\d{1,2})?분?\)', item)
+            if m:
+                times.append(int(m.group(1))*60 + int(m.group(2) or 0))
+        if len(times) < 2:
+            return True
+        return len(set(times)) == len(times) and times == sorted(times)
+
+    def _fmt_dest(dest_raw: str) -> str:
+        """
+        납품 동선 포맷팅.
+        - 순차 납품: ① ② ③ ... 번호로 나열
+        - 분기 납품: 🔀 A / B / C 형태로 표시 (주문건수에 따라 변동)
+        """
+        items = [s.strip() for s in dest_raw.replace('\n',' / ').split(' / ') if s.strip()]
+        if not items:
+            return dest_raw
+
+        if _is_sequential(dest_raw):
+            # 순차 납품 → 번호 나열
+            return "<br>".join(f"**{i}.** {s}" for i, s in enumerate(items, 1))
+        else:
+            # 분기 납품 → 🔀 A / B / C 형태
+            # 같은 시간대끼리 그룹핑해서 묶기
+            groups = []
+            current_group = [items[0]]
+            for i in range(1, len(items)):
+                # 앞 아이템과 시간이 같으면 같은 그룹
+                def get_min(s):
+                    m = _re.search(r'\((\d{1,2})시(\d{1,2})?분?\)', s)
+                    return int(m.group(1))*60+int(m.group(2) or 0) if m else -1
+                if get_min(items[i]) == get_min(items[i-1]):
+                    current_group.append(items[i])
+                else:
+                    groups.append(current_group)
+                    current_group = [items[i]]
+            groups.append(current_group)
+
+            parts_out = []
+            for g in groups:
+                if len(g) == 1:
+                    parts_out.append(f"**{len(parts_out)+1}.** {g[0]}")
+                else:
+                    parts_out.append("🔀 " + "  /  ".join(g) + " _(주문건수에 따라 변동)_")
+            return "<br>".join(parts_out)
+
+    # ── 7. ★ 현재 예상 위치 계산 ────────────────────────────────────────
+    def _parse_time_stops(dest_raw: str) -> list:
+        """
+        납품 동선 문자열에서 [(거래처명, HH, MM), ...] 파싱.
+        실제 context_text 형태: " / " 구분자 한 줄 문자열
+        "(서울)흥진사(10시)" → ("흥진사", 10, 0)
+        "(서울)명진(10시5분)" → ("명진", 10, 5)
+        """
+        # " / " 또는 줄바꿈으로 분리
+        raw_clean = dest_raw.replace('\r\n', ' / ').replace('\n', ' / ').replace('\r', '')
+        items     = [s.strip() for s in raw_clean.split(' / ') if s.strip()]
+        stops = []
+        for item in items:
+            m = _re.search(
+                r'\(([^)]+)\)([^(]+)\((\d{1,2})시(\d{1,2})?분?\)',
+                item
+            )
+            if m:
+                name = m.group(2).strip()
+                hh   = int(m.group(3))
+                mm   = int(m.group(4)) if m.group(4) else 0
+                stops.append((name, hh, mm))
+        return stops
+
+    def _estimate_location(driver_name: str, routes: list) -> str:
+        """
+        현재 시각 기준으로 기사 예상 위치 계산.
+        오늘 요일의 노선에서 현재 시각과 납품 예정 시각을 비교.
+        """
+        now        = _dt.now()
+        weekday    = now.weekday()   # 0=월 ~ 4=금
+        day_names  = ["월요일","화요일","수요일","목요일","금요일","토요일","일요일"]
+        today_name = day_names[weekday]
+
+        # 주말
+        if weekday >= 5:
+            return f"⛔ 오늘은 **{today_name}**입니다. {driver_name} 기사는 주말에 운행하지 않습니다."
+
+        # 오늘 요일 노선 찾기
+        today_route = next((dest for day, dest in routes if day == today_name), None)
+        if not today_route:
+            return f"오늘({today_name}) {driver_name} 기사의 노선 데이터를 찾을 수 없습니다."
+
+        stops = _parse_time_stops(today_route)
+        if not stops:
+            return f"{driver_name} 기사의 오늘 노선에서 시간 데이터를 파싱할 수 없습니다."
+
+        now_min = now.hour * 60 + now.minute
+        first_stop_min = stops[0][1] * 60 + stops[0][2]
+        last_stop_min  = stops[-1][1] * 60 + stops[-1][2]
+
+        # 출발 전
+        if now_min < first_stop_min:
+            diff = first_stop_min - now_min
+            return (
+                f"🕐 현재 시각 **{now.hour:02d}:{now.minute:02d}** 기준\n\n"
+                f"아직 출발 전입니다. 첫 납품지 **{stops[0][0]}** 도착 예정까지 약 **{diff}분** 남았습니다."
+            )
+
+        # 마지막 납품 완료 후
+        if now_min > last_stop_min + 30:
+            return (
+                f"🕐 현재 시각 **{now.hour:02d}:{now.minute:02d}** 기준\n\n"
+                f"오늘 납품이 완료되었을 것으로 예상됩니다. "
+                f"마지막 납품지 **{stops[-1][0]}** 도착 예정 시각은 **{stops[-1][1]:02d}:{stops[-1][2]:02d}**였습니다."
+            )
+
+        # 현재 납품 중
+        location_msg = ""
+        for i, (name, hh, mm) in enumerate(stops):
+            stop_min = hh * 60 + mm
+            if now_min == stop_min:
+                location_msg = f"📍 **{name}** 납품 중 (예정 도착 시각: **{hh:02d}:{mm:02d}**)"
+                break
+            if now_min < stop_min:
+                if i == 0:
+                    location_msg = f"🚗 이동 중 → **{name}** 도착 예정 **{hh:02d}:{mm:02d}** (약 {stop_min - now_min}분 후)"
+                else:
+                    prev_name, prev_hh, prev_mm = stops[i-1]
+                    location_msg = (
+                        f"🚗 **{prev_name}** 납품 완료 후 **{name}** 이동 중\n"
+                        f"  → {name} 도착 예정 **{hh:02d}:{mm:02d}** (약 {stop_min - now_min}분 후)"
+                    )
+                break
+
+        if not location_msg:
+            location_msg = f"📍 **{stops[-1][0]}** 근처에 있을 것으로 예상됩니다."
+
+        # 전체 오늘 동선 요약
+        route_summary = "\n".join(
+            f"  {'✅' if (h*60+m) <= now_min else '⏳'} **{h:02d}:{m:02d}** {n}"
+            for n, h, m in stops
+        )
+
+        return (
+            f"🕐 현재 시각 **{now.hour:02d}:{now.minute:02d}** ({today_name}) 기준\n\n"
+            f"### {driver_name} 기사 예상 현재 위치\n"
+            f"{location_msg}\n\n"
+            f"**오늘({today_name}) 전체 동선:**\n{route_summary}\n\n"
+            f"> ⚠️ 예상 위치는 납품 시각 기준 추정값입니다. 실제 위치는 기사에게 직접 확인해 주세요."
+        )
+
+    # ── 8. 현재 위치 질문 처리 ───────────────────────────────────────────
+    if is_location_query:
+        target_name = specific_name
+        if not target_name:
+            # 이름 미지정 시 서울 기사이면 이번 주 운행자, 부산이면 안내
+            if scope_seoul and not scope_busan:
+                target_name = _this_week_driver
+            elif scope_busan and not scope_seoul:
+                return "현재 위치 조회는 특정 기사 이름을 포함해 질문해 주세요. (예: '김병일 기사 지금 어디?')"
+            else:
+                return "현재 위치를 조회할 기사 이름을 포함해 질문해 주세요. (예: '심효섭 기사 지금 어디?')"
+
+        # target 기사의 routes 찾기
+        target_routes = None
+        for dk, rv in driver_blocks.items():
+            if target_name in dk:
+                target_routes = rv
+                break
+
+        if target_routes is None:
+            return f"{target_name} 기사의 노선 데이터를 찾을 수 없습니다."
+
+        # 서울 기사: 이번 주 운행 여부 확인
+        if target_name in SEOUL_DRIVERS:
+            if target_name != _this_week_driver:
+                return (
+                    f"⏸️ **{target_name} 기사**는 이번 주 운행 주간이 아닙니다.\n\n"
+                    f"이번 주 서울 운행은 **{_this_week_driver} 기사** 담당입니다.\n"
+                    f"다음 주부터 **{target_name} 기사** 노선으로 변경됩니다.\n\n"
+                    f"📞 확인이 필요하면 **{target_name} 기사 ({DRIVER_INFO[target_name]['tel']})**에게 직접 문의해 주세요."
+                )
+
+        return _estimate_location(target_name, target_routes)
+
+    # ── 9. 일반 노선 조회 답변 ───────────────────────────────────────────
     lines = []
 
     # 도입 멘트
     if specific_name:
-        lines.append(f"**{specific_name} 기사**의 납품 동선 정보입니다.\n")
+        lines.append(f"**{specific_name} 기사** 납품 동선 정보입니다.\n")
     elif scope_busan and not scope_seoul:
         lines.append("**부산공장 지입기사** 납품 동선 정보입니다.\n")
     elif scope_seoul and not scope_busan:
@@ -1292,15 +1594,15 @@ def _format_driver_route_answer(query: str, context_text: str) -> str:
     else:
         lines.append("지입기사 전원의 납품 동선 정보입니다.\n")
 
-    # 소속별 그룹 출력
     groups = []
-    if not (scope_seoul and not scope_busan):   # 부산 포함
+    if not (scope_seoul and not scope_busan):
         groups.append(("🚚 부산공장 지입기사", BUSAN_DRIVERS))
-    if not (scope_busan and not scope_seoul):   # 서울 포함
+    if not (scope_busan and not scope_seoul):
         groups.append(("🚌 서울(중부물류센터) 지입기사", SEOUL_DRIVERS))
 
     for group_title, name_list in groups:
-        group_drivers = [
+        is_seoul_group = (name_list == SEOUL_DRIVERS)
+        group_drivers  = [
             (dk, dv) for dk, dv in driver_blocks.items()
             if any(n in dk for n in name_list) and _should_include(dk)
         ]
@@ -1309,44 +1611,69 @@ def _format_driver_route_answer(query: str, context_text: str) -> str:
 
         lines.append(f"## {group_title}\n")
 
+        # ── 서울 기사: 이번 주 / 다음 주 노선 배너 ──────────────────────
+        if is_seoul_group and not specific_name:
+            lines.append(
+                f"> 🗓️ **이번 주 운행 노선: {_this_week_driver} 기사**  "
+                f"｜  다음 주: {_next_week_driver} 기사\n"
+                f"> 두 기사는 격주로 노선을 교대하며 **둘 다 월~금 매일 운행**합니다.\n"
+            )
+
+        # ── 이번 주 운행 기사 먼저, 다음 주 기사는 뒤에 ─────────────────
+        if is_seoul_group and not specific_name:
+            # 이번 주 기사 먼저 정렬
+            group_drivers = sorted(
+                group_drivers,
+                key=lambda x: (0 if _this_week_driver in x[0] else 1)
+            )
+
         for driver_key, routes in group_drivers:
-            info = _get_info(driver_key)
-            lines.append(f"### {info['short']} 기사")
-            lines.append(f"- 📱 연락처: {info['tel']}  |  🚛 차량: {info['car']}  |  📍 담당 권역: {info['area']}")
-            lines.append("- 운행: **주 5일 (월~금) 매일 운행**\n")
+            info  = _get_info(driver_key)
+            short = info["short"]
+
+            # 이번 주 / 다음 주 배지
+            if is_seoul_group and not specific_name:
+                if short == _this_week_driver:
+                    week_tag = "  🟢 **이번 주 운행 노선**"
+                else:
+                    week_tag = "  🔵 다음 주 운행 노선"
+            else:
+                week_tag = ""
+
+            lines.append(f"### {short} 기사{week_tag}")
+            lines.append(
+                f"- 📱 **{info['tel']}**  |  🚛 {info['car']}  |  📍 {info['area']}"
+            )
+            lines.append("- 운행: **월~금 (주 5일) 매일 운행**\n")
 
             if routes:
-                lines.append("| 요일 | 납품 동선 (거래처 · 도착 예정시간) |")
-                lines.append("|:----:|:----------------------------------|")
-                for day, dest in routes:
-                    # 납품처가 많으면 줄을 나눠 읽기 편하게 번호 붙이기
-                    stops = [s.strip() for s in dest.replace(' / ', '/').split('/') if s.strip()]
-                    if len(stops) <= 3:
-                        dest_fmt = "  →  ".join(stops)
-                    else:
-                        # 4개 이상이면 2줄로 분리
-                        mid = (len(stops) + 1) // 2
-                        row1 = "  →  ".join(stops[:mid])
-                        row2 = "  →  ".join(stops[mid:])
-                        dest_fmt = f"{row1}<br>↪ {row2}"
-                    lines.append(f"| {day} | {dest_fmt} |")
+                compressed = _compress_routes(routes)
+                lines.append("| 운행 요일 | 납품 동선 |")
+                lines.append("|:---------:|:---------|")
+                for day_label, dest_raw in compressed:
+                    lines.append(f"| {day_label} | {_fmt_dest(dest_raw)} |")
                 lines.append("")
             else:
                 lines.append("_동선 데이터 없음_\n")
 
-    # 특이사항 (물류팀 운영 규칙에서 하드코딩)
+    # 특이사항
     if not specific_name:
         lines.append("---")
         lines.append("**💡 운행 특이사항**")
         if not (scope_seoul and not scope_busan):
-            lines.append("- 부산공장 기사: 미성폴리머(김해)/신항 등 추가 운행은 대부분 첫 운행, 점심 이후 추가 운행 불가")
+            lines.append(
+                "- 부산공장 기사: 미성폴리머(김해)/신항 등 추가 운행은 첫 운행(오전)에만 가능, 점심 이후 불가"
+            )
         if not (scope_busan and not scope_seoul):
-            lines.append("- 서울 기사: 격주 단위로 동선 변경하여 운행")
+            lines.append(
+                f"- 서울 기사: 이용구·심효섭 기사가 **격주로 노선 교대** 운행 "
+                f"(이번 주: **{_this_week_driver}** 기사 노선 / 다음 주: {_next_week_driver} 기사 노선)"
+            )
         lines.append("")
 
     lines.append("📞 납품 일정 변경·추가 문의는 **물류팀 담당자**에게 연락해 주세요.")
-
     return "\n".join(lines)
+
 
 
 def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: LearningSystem, 
@@ -1667,15 +1994,48 @@ def analyze_pdf_logistics(file_bytes):
     except Exception as e:
         return f"❌ PDF 처리 실패: {str(e)}"
     
-def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0):
+def _calc_loadable_plt(plt_w: float, plt_l: float, car_w: float, car_l: float) -> int:
     """
-    차량 데이터 WHOLE 문서(파이프 구분 텍스트)를 파싱해 최적 차량 추천
-    total_pallets   : 필요 파렛트 수 (부피 기준)
-    total_weight_kg : 총 중량 kg (0이면 중량 조건 무시)
-    반환 dict 추가 키: max_weight_ton, weight_ok
+    파렛트(plt_w × plt_l)를 차량 적재함(car_w × car_l)에
+    가로·세로 두 방향 + 혼합 배열로 최대 몇 개 올릴 수 있는지 계산. 단위: m
     """
-    PLT_W, PLT_L = 1.1, 1.1  # 표준 파렛트 1100×1100mm
+    best = 0
+    orientations = [(plt_w, plt_l), (plt_l, plt_w)]
 
+    # 단일 방향
+    for pw, pl in orientations:
+        if pw <= car_w:
+            cols = int(car_w / pw)
+            rows = int(car_l / pl)
+            best = max(best, cols * rows)
+
+    # 혼합 배열: 앞 구간 방향1, 나머지 구간 방향2
+    for pw1, pl1 in orientations:
+        for pw2, pl2 in orientations:
+            if (pw1, pl1) == (pw2, pl2):
+                continue
+            cols1 = int(car_w / pw1) if pw1 <= car_w else 0
+            cols2 = int(car_w / pw2) if pw2 <= car_w else 0
+            if cols1 == 0 or cols2 == 0:
+                continue
+            for n1 in range(1, int(car_l / pl1) + 1):
+                rem = car_l - n1 * pl1
+                if rem < 0:
+                    break
+                n2 = int(rem / pl2)
+                best = max(best, cols1 * n1 + cols2 * n2)
+
+    return best
+
+
+def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0,
+                             plt_w: float = 1.1, plt_l: float = 1.1):
+    """
+    차량 데이터 WHOLE 문서를 파싱해 최적 차량 추천.
+    ─ 1순위: 파렛트 실물 크기(plt_w × plt_l)를 차량 적재함에 실제 배열 가능한 수량으로 판단
+    ─ 2순위: 중량은 참고용(weight_ok 플래그) — 경고 표시용으로만 사용
+    plt_w, plt_l : 파렛트 실제 가로·세로 (m), 기본값 1100×1100mm
+    """
     try:
         client = QdrantClient(url=QDRANT_HOST)
 
@@ -1697,7 +2057,7 @@ def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0):
         total_weight_ton = total_weight_kg / 1000.0
 
         candidates = []
-        lowbed_entry = None   # 로베드는 높이 기준 특수차량 — 별도 보관
+        lowbed_entry = None
         for line in content.split('\n'):
             parts = [p.strip() for p in line.split('|')]
             if len(parts) < 4:
@@ -1706,23 +2066,18 @@ def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0):
             if not name or '톤수' in name or name.startswith('[') or '특이사항' in name or '높이' in name:
                 continue
 
-            # ★ 로베드(Low-v/Low-bed)는 적재함 길이가 아닌 높이 기준 차량
-            #    → 일반 부피 계산에서 제외, 별도 보관
             is_lowbed = any(kw in name for kw in ('로브이', 'Low-v', 'Low-bed', '로베드', 'low-bed', 'low-v'))
             if is_lowbed:
-                max_weight_ton_lb = None
                 nums_lb = re.findall(r'[\d.]+', parts[1]) if len(parts) >= 2 else []
-                if nums_lb:
-                    max_weight_ton_lb = float(nums_lb[-1])
                 lowbed_entry = {
                     "name"          : name,
                     "spec"          : "높이 2.6m 이상 제품 전용 특수차량",
                     "max_plt"       : 999,
-                    "max_weight_ton": max_weight_ton_lb,
+                    "max_weight_ton": float(nums_lb[-1]) if nums_lb else None,
                     "weight_ok"     : True,
                     "is_lowbed"     : True,
                 }
-                continue   # 일반 후보 계산에서 제외
+                continue
 
             try:
                 length = float(re.search(r'([\d.]+)m', parts[2]).group(1))
@@ -1730,19 +2085,17 @@ def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0):
             except Exception:
                 continue
 
-            # 최대중량 파싱 (예: "~ 1.32", "1.33 ~ 2.75")
             max_weight_ton = None
             if len(parts) >= 2:
                 nums = re.findall(r'[\d.]+', parts[1])
                 if nums:
                     max_weight_ton = float(nums[-1])
 
-            cols    = int(width  / PLT_W)
-            rows    = int(length / PLT_L)
-            max_plt = cols * rows
+            # ── 핵심: 파렛트 실물 크기로 실제 배열 가능 수량 계산 ──────────
+            max_plt = _calc_loadable_plt(plt_w, plt_l, width, length)
 
             if max_plt < total_pallets:
-                continue
+                continue  # 부피상 적재 불가 → 후보 제외
 
             weight_ok = True
             if total_weight_ton > 0 and max_weight_ton is not None:
@@ -1760,19 +2113,25 @@ def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0):
         if not candidates:
             return None
 
-        # 중량·부피 모두 충족 우선, 없으면 부피만 충족으로 fallback
-        ok_both = [c for c in candidates if c["weight_ok"]]
-        pool    = ok_both if ok_both else candidates
-        return sorted(pool, key=lambda x: x['max_plt'])[0]
+        # ── 우선순위 선정 로직 ────────────────────────────────────────────
+        # 1그룹(ok_both): PLT 수 OK + 중량 OK  → 이 중 가장 작은 차량
+        # 2그룹(ok_vol) : PLT 수 OK + 중량 초과 → 불가피 시 사용, weight_ok=False 경고
+        ok_both = [c for c in candidates if c['weight_ok']]
+        ok_vol  = [c for c in candidates if not c['weight_ok']]
+
+        if ok_both:
+            # PLT 수 기준으로 가장 작은 차량 (중량도 만족하는 후보 중)
+            return sorted(ok_both, key=lambda x: x['max_plt'])[0]
+        elif ok_vol:
+            # 중량 초과 차량만 남았을 때: 그나마 가장 작은 것 추천 + 경고
+            logger.warning("중량 OK 차량 없음 → 부피 기준 차량 추천 (중량 경고 표시)")
+            return sorted(ok_vol, key=lambda x: x['max_plt'])[0]
+        else:
+            return None
 
     except Exception as e:
         logger.error(f"⚠️ DB 배차 조회 중 오류: {e}")
         return None
-
-    except Exception as e:
-        logger.error(f"⚠️ DB 배차 조회 중 오류: {e}")
-        return None
-
 # 메인 함수
 if __name__ == "__main__":
     test_queries = [

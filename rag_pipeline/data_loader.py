@@ -43,19 +43,18 @@ VECTOR_BATCH_SIZE      = int(os.getenv("VECTOR_BATCH_SIZE", "128"))
 # GROUP : 특정 컬럼 기준 그룹핑
 # ROW   : 자재코드 기반 행 단위 문서
 SHEET_STRATEGY: Dict[str, str] = {
-    "수출 포장량 산출 수식"      : "WHOLE",
-    "포장량 산출 데이터"         : "WHOLE",
-    "차량 데이터"                : "WHOLE",
-    "컨베어벨트 직경 산출 수식"  : "WHOLE",
-    "파렛트, 박스 데이터"        : "WHOLE",
-    "물류팀 운영 규칙"           : "QA",
-    "조직 및 담당자 정보"        : "GROUP",
-    "컨베어벨트 규격 데이터"     : "ROW",
-    "주름혹벨트 우든박스 사이즈" : "ROW",
-    "크롤러 러버트랙"            : "ROW",
-    "용차, 배차 차량 노선 데이터": "GROUP",
-    # 지입기사 노선: 4명 기사 전원을 1개 문서로 묶어야 검색 시 누락 없음
-    "지입 차량(기사) 노선 데이터": "WHOLE",
+    "수출 포장량 산출 수식"          : "WHOLE",
+    "포장량 산출 데이터"             : "WHOLE",
+    "차량 데이터"                    : "WHOLE",
+    "컨베어벨트 직경 산출 수식"      : "WHOLE",
+    "파렛트, 박스 데이터"            : "WHOLE",
+    "물류팀 운영 규칙"               : "QA",
+    "물류팀 현황 데이터"             : "GROUP",   # 담당자 정보 — GROUP 전략
+    "컨베어벨트 규격 데이터"         : "ROW",
+    "주름혹벨트 우든박스 사이즈 데이터": "ROW",
+    "크롤러 러버트랙 규격 데이터"    : "ROW",
+    "용차 차량 노선 데이터"          : "GROUP",   # 실제 시트명으로 수정
+    "지입 차량(기사) 노선 데이터"    : "WHOLE",
 }
 
 # ── 유틸 ─────────────────────────────────────────────────────────────────────
@@ -273,12 +272,21 @@ def sheet_to_row_docs(df: pd.DataFrame, sheet_name: str, file_name: str) -> List
 def load_excel(file_path: str) -> List[Document]:
     file_name = os.path.basename(file_path)
     documents = []
+
+    # 시트별 헤더 행 오버라이드 (0-indexed)
+    # 엑셀에서 실제 컬럼 헤더가 0행이 아닌 경우 명시
+    HEADER_ROW_OVERRIDE = {
+        "물류팀 현황 데이터": 2,   # row 0: 빈 행, row 1: 섹션 타이틀, row 2: 실제 헤더
+    }
+
     try:
         excel_file = pd.ExcelFile(file_path)
         logger.info(f"📊 Excel: {file_name} ({len(excel_file.sheet_names)}개 시트)")
 
         for sheet_name in excel_file.sheet_names:
-            df = pd.read_excel(file_path, sheet_name=sheet_name).fillna("")
+            header_row = HEADER_ROW_OVERRIDE.get(sheet_name, 0)
+            df = pd.read_excel(file_path, sheet_name=sheet_name,
+                               header=header_row).fillna("")
             strategy = SHEET_STRATEGY.get(sheet_name, "ROW")
             logger.info(f"  [{sheet_name}] 전략:{strategy} ({len(df)}행)")
 

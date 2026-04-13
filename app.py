@@ -15,6 +15,8 @@ TEAM_CONFIG = {
 # 1. 초기 카테고리 설정
 if 'selected_team' not in st.session_state:
     st.session_state.selected_team = "국내영업팀"
+    
+selected_color = TEAM_CONFIG[st.session_state.selected_team]['color']
 
 # 2. 팀별 색상
 st.markdown(f"""
@@ -34,8 +36,64 @@ st.markdown(f"""
     
     .btn-track {{ background-color: {TEAM_CONFIG["트랙영업팀"]["color"]}; }}
     .btn-track:hover {{ background-color: {TEAM_CONFIG["트랙영업팀"]["hover"]}; transform: translateY(-3px); }}
+    
 </style>
 """, unsafe_allow_html=True)
+
+# --- 시뮬레이터 문의 팝업 ---
+@st.dialog("📋 시뮬레이터 문의하기")
+def show_simulator_inquiry_popup(simulator_type: str, sim_summary: str):
+    """시뮬레이터 결과 기반 이메일 문의 팝업"""
+    current_team = st.session_state.get("selected_team", "")
+
+    st.markdown(
+        f'''<div style="background:linear-gradient(135deg,rgba(59,130,246,0.08),rgba(16,185,129,0.08));
+        border-left:4px solid #3b82f6;border-radius:8px;padding:12px 16px;
+        margin-bottom:16px;font-size:13px;color:#374151;line-height:1.7;">
+        <strong>[시뮬레이터 문의] {simulator_type}</strong><br>
+        시뮬레이션 결과를 첨부해 담당자에게 문의 메일을 발송합니다.
+        </div>''', unsafe_allow_html=True
+    )
+
+    author = st.text_input("✍️ 작성자", placeholder="이름을 입력하세요", max_chars=30)
+
+    st.markdown("**📝 문의 내용**")
+    default_content = f"[시뮬레이터 결과]\n{sim_summary}\n\n[추가 문의사항]\n"
+    inquiry_text = st.text_area(
+        label="문의 내용",
+        value=default_content,
+        height=180,
+        max_chars=1000,
+        label_visibility="collapsed"
+    )
+
+    st.markdown("")
+    col_send, col_cancel = st.columns([1, 1])
+    with col_send:
+        if st.button("📨 문의 발송", use_container_width=True, type="primary"):
+            if not author.strip():
+                st.warning("작성자를 입력해주세요.")
+            elif not inquiry_text.strip():
+                st.warning("문의 내용을 입력해주세요.")
+            else:
+                try:
+                    success = EMAIL_NOTIFIER.send_simulator_inquiry(
+                        simulator_type=simulator_type,
+                        team=current_team,
+                        author=author.strip(),
+                        content=inquiry_text.strip()
+                    )
+                except Exception:
+                    success = False
+                if success:
+                    st.toast(f"✅ 문의가 담당자에게 전달되었습니다! ({author})", icon="📋")
+                else:
+                    st.toast("⚠️ 전송 실패. 이메일 설정(.env)을 확인해주세요.", icon="⚠️")
+                st.rerun()
+    with col_cancel:
+        if st.button("취소", use_container_width=True):
+            st.rerun()
+
 
 # --- 부정 피드백 사유 팝업 ---
 @st.dialog("💬 답변이 불만족스러우셨나요?")
@@ -182,6 +240,7 @@ except ImportError:
     class _DummyNotifier:
         enabled = False
         def send_improvement_request(self, content, team): return False
+        def send_simulator_inquiry(self, simulator_type, team, author, content): return False
     EMAIL_NOTIFIER = _DummyNotifier()
     import logging
     logger = logging.getLogger(__name__)
@@ -189,9 +248,10 @@ except ImportError:
 load_dotenv()
 
 st.set_page_config(
-    page_title="물류 AI 챗봇 (RAG)", 
-    layout="wide", 
-    initial_sidebar_state="expanded"
+    page_title="LOGIBOT-DRB",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"  # 사이드바 시작부터 펼침
 )
 
 # --- CSS 스타일 ---
@@ -268,14 +328,9 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 사이드바 고정 CSS (축소/확장 버튼 및 리사이즈 비활성화) ---
+# --- 사이드바 고정 CSS ---
 st.markdown("""
     <style>
-    /* 사이드바 접기/펼치기 토글 버튼 숨김 */
-    button[data-testid="collapsedControl"],
-    [data-testid="collapsedControl"] {
-        display: none !important;
-    }
     /* 사이드바 드래그 리사이즈 핸들 비활성화 */
     [data-testid="stSidebarResizeHandle"],
     .st-emotion-cache-1cypcdb,
@@ -284,7 +339,7 @@ st.markdown("""
         display: none !important;
         pointer-events: none !important;
     }
-    /* 사이드바 최소 너비 고정 */
+    /* 사이드바 너비 고정 (expanded 상태 기준) */
     [data-testid="stSidebar"] {
         min-width: 21rem !important;
         max-width: 21rem !important;
@@ -388,30 +443,49 @@ def extract_table_from_text(text: str) -> tuple:
     import re as _re
 
     def render_one_table(table_lines: list) -> str:
-        """마크다운 표 줄 목록 → HTML <table>"""
+        """마크다운 표 줄 목록 → HTML <table> (** 제거 + 결론 강조 포함)"""
         rows = [l for l in table_lines
                 if l.strip() and not _re.match(r'^\s*\|[\s\-:|]+\|\s*$', l)]
         if not rows:
             return ""
 
+        def _clean_cell(text: str) -> str:
+            """셀 내 마크다운 변환 — ** → <strong>, * → <em>, ` → <code>"""
+            text = _re.sub(r'\*\*([^*\n]+)\*\*', r'<strong>\1</strong>', text)
+            text = _re.sub(r'\*([^*\n]+)\*',       r'<em>\1</em>',          text)
+            text = _re.sub(r'`([^`]+)`',               r'<code>\1</code>',      text)
+            return text.strip()
+
+        # 결론/추천 행 감지 키워드
+        HIGHLIGHT_KW = ['추천', '결론', '최적', '권장', '✅', '⭐', '→']
+
         html = (
-            '<div style="overflow-x:auto;margin:10px 0;">'
-            '<table style="border-collapse:collapse;width:100%;font-size:13px;">'
+            '<div style="overflow-x:auto;margin:12px 0;">'
+            '<table style="border-collapse:collapse;width:100%;font-size:13px;'
+            'border-radius:8px;overflow:hidden;">'
         )
         for i, row in enumerate(rows):
-            cells = [c.strip() for c in row.strip().strip('|').split('|')]
+            cells = [_clean_cell(c) for c in row.strip().strip('|').split('|')]
             tag = 'th' if i == 0 else 'td'
+            is_highlight = i > 0 and any(kw in row for kw in HIGHLIGHT_KW)
             if i == 0:
-                # 헤더: 다크모드에서도 보이는 중간 톤 배경
                 cell_style = (
-                    'background:rgba(99,102,241,0.75);color:#ffffff;'
-                    'padding:8px 12px;text-align:left;font-weight:700;white-space:nowrap;'
+                    'background:rgba(99,102,241,0.8);color:#ffffff;'
+                    'padding:9px 14px;text-align:left;font-weight:700;'
+                    'white-space:nowrap;font-size:12px;letter-spacing:0.3px;'
+                )
+            elif is_highlight:
+                # 결론/추천 행 강조
+                cell_style = (
+                    'background:rgba(16,185,129,0.12);'
+                    'padding:8px 14px;border-bottom:1px solid rgba(16,185,129,0.3);'
+                    'vertical-align:middle;font-weight:600;'
                 )
             else:
-                bg = 'rgba(0,0,0,0.03)' if i % 2 == 0 else 'transparent'
+                bg = 'rgba(0,0,0,0.025)' if i % 2 == 0 else 'transparent'
                 cell_style = (
-                    f'background:{bg};padding:7px 12px;'
-                    'border-bottom:1px solid rgba(148,163,184,0.25);vertical-align:top;'
+                    f'background:{bg};padding:8px 14px;'
+                    'border-bottom:1px solid rgba(148,163,184,0.2);vertical-align:middle;'
                 )
             html += '<tr>' + ''.join(
                 f'<{tag} style="{cell_style}">{c}</{tag}>' for c in cells
@@ -447,13 +521,16 @@ def extract_table_from_text(text: str) -> tuple:
     return None, '\n'.join(result)   # DataFrame 자리는 None
 
 
+# 결론/추천 강조 키워드
+_CONCLUSION_KW = ['✅', '추천', '결론', '최적', '권장', '→ ', '⭐', '최종']
+
 def md_to_html_answer(text: str) -> str:
     """
     LLM 마크다운 답변 → chat-bubble HTML 변환.
-    - 표: extract_table_from_text가 이미 HTML로 변환해둠
-    - ## 헤더: 다크/라이트 모드 모두 보이는 색상 (inherit 사용)
-    - **bold**: 색상 고정 제거 → 모드에 따라 자동
-    - 리스트, 구분선, 줄바꿈
+    - 표: extract_table_from_text가 이미 HTML로 변환
+    - 헤더: 레벨별 스타일 차별화
+    - 결론/추천 문장: 초록 배경 박스로 강조
+    - **bold** / 리스트 / 구분선 / 줄바꿈 처리
     """
     import re as _re
 
@@ -464,37 +541,39 @@ def md_to_html_answer(text: str) -> str:
     while i < len(lines):
         line = lines[i]
 
-        # 이미 HTML 태그인 줄 (표 HTML 등) → 그대로 통과
+        # HTML 태그 줄 → 그대로 통과
         if line.strip().startswith('<') and '>' in line:
             result_lines.append(line)
             i += 1
             continue
 
-        # 헤더 (###, ##, #) — 다크모드 대응: color 고정 제거, border만 유지
+        # 헤더 — 레벨별 스타일 차별화
         h = _re.match(r'^(#{1,3})\s+(.+)$', line)
         if h:
             level = len(h.group(1))
-            size  = {1: '1.2em', 2: '1.1em', 3: '1.0em'}.get(level, '1.0em')
-            result_lines.append(
-                f'<div style="font-size:{size};font-weight:700;'
-                f'margin:14px 0 6px;'
-                f'border-bottom:2px solid rgba(99,102,241,0.4);padding-bottom:4px;">'
-                f'{h.group(2)}</div>'
-            )
+            if level == 1:
+                style = ('font-size:1.2em;font-weight:800;margin:16px 0 8px;'
+                         'border-left:4px solid rgba(99,102,241,0.8);padding-left:10px;')
+            elif level == 2:
+                style = ('font-size:1.05em;font-weight:700;margin:14px 0 6px;'
+                         'border-bottom:2px solid rgba(99,102,241,0.35);padding-bottom:4px;')
+            else:
+                style = 'font-size:0.97em;font-weight:700;margin:10px 0 4px;color:inherit;'
+            result_lines.append(f'<div style="{style}">{_inline_fmt(h.group(2))}</div>')
             i += 1
             continue
 
         # 구분선
         if _re.match(r'^[-─━]{3,}$', line.strip()):
             result_lines.append(
-                '<hr style="border:none;border-top:1px solid rgba(148,163,184,0.3);margin:10px 0;">'
+                '<hr style="border:none;border-top:1px solid rgba(148,163,184,0.25);margin:12px 0;">'
             )
             i += 1
             continue
 
         # 빈 줄
         if not line.strip():
-            result_lines.append('<div style="height:5px;"></div>')
+            result_lines.append('<div style="height:6px;"></div>')
             i += 1
             continue
 
@@ -503,10 +582,13 @@ def md_to_html_answer(text: str) -> str:
             ol_items = []
             while i < len(lines) and _re.match(r'^\d+\.\s+', lines[i]):
                 item_text = _re.sub(r'^\d+\.\s+', '', lines[i])
-                ol_items.append(f'<li style="margin:5px 0;line-height:1.6;">{_inline_fmt(item_text)}</li>')
+                ol_items.append(
+                    f'<li style="margin:6px 0;line-height:1.7;">{_inline_fmt(item_text)}</li>'
+                )
                 i += 1
             result_lines.append(
-                '<ol style="margin:6px 0 8px 22px;padding:0;">' + ''.join(ol_items) + '</ol>'
+                '<ol style="margin:8px 0 10px 22px;padding:0;line-height:1.7;">'
+                + ''.join(ol_items) + '</ol>'
             )
             continue
 
@@ -515,15 +597,30 @@ def md_to_html_answer(text: str) -> str:
             ul_items = []
             while i < len(lines) and _re.match(r'^[\-\*•]\s+', lines[i]):
                 item_text = _re.sub(r'^[\-\*•]\s+', '', lines[i])
-                ul_items.append(f'<li style="margin:5px 0;line-height:1.6;">{_inline_fmt(item_text)}</li>')
+                ul_items.append(
+                    f'<li style="margin:6px 0;line-height:1.7;">{_inline_fmt(item_text)}</li>'
+                )
                 i += 1
             result_lines.append(
-                '<ul style="margin:6px 0 8px 22px;padding:0;">' + ''.join(ul_items) + '</ul>'
+                '<ul style="margin:8px 0 10px 22px;padding:0;line-height:1.7;">'
+                + ''.join(ul_items) + '</ul>'
             )
             continue
 
-        # 일반 텍스트
-        result_lines.append(_inline_fmt(line) + '<br>')
+        # 결론/추천 강조 박스 — 키워드 포함 일반 텍스트
+        formatted = _inline_fmt(line)
+        if any(kw in line for kw in _CONCLUSION_KW):
+            result_lines.append(
+                '<div style="'
+                'background:rgba(16,185,129,0.1);'
+                'border-left:3px solid rgba(16,185,129,0.7);'
+                'border-radius:0 6px 6px 0;'
+                'padding:7px 12px;margin:6px 0;'
+                'font-weight:600;line-height:1.7;'
+                f'">{formatted}</div>'
+            )
+        else:
+            result_lines.append(formatted + '<br>')
         i += 1
 
     return '\n'.join(result_lines)
@@ -532,20 +629,25 @@ def md_to_html_answer(text: str) -> str:
 def _inline_fmt(text: str) -> str:
     """
     인라인 마크다운 변환.
-    bold/italic 색상 고정 제거 → 다크/라이트 모드 자동 대응
+    **bold** → <strong> (색상 inherit, 다크/라이트 자동)
+    *italic* → <em>
+    `code` → <code>
+    잔여 ** 특수문자 완전 제거
     """
     import re as _re
-    # **굵게** — 색상 inherit, font-weight만 지정
+    # **굵게** → <strong>
     text = _re.sub(
-        r'\*\*(.+?)\*\*',
+        r'\*\*([^*\n]+)\*\*',
         r'<strong style="font-weight:700;">\1</strong>',
         text
     )
+    # 짝이 맞지 않는 잔여 ** 제거
+    text = text.replace('**', '')
     # *기울임*
-    text = _re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
+    text = _re.sub(r'\*([^*\n]+)\*', r'<em>\1</em>', text)
     # `코드`
     text = _re.sub(
-        r'`(.+?)`',
+        r'`([^`]+)`',
         r'<code style="background:rgba(99,102,241,0.1);padding:1px 5px;'
         r'border-radius:3px;font-size:0.9em;">\1</code>',
         text
@@ -752,65 +854,6 @@ with st.sidebar:
                     st.session_state.editing_id = None
                     st.rerun()
                     
-    st.markdown("---")
-    st.subheader("📁 데이터 분석 요청")
-    uploaded_file = st.file_uploader(
-        "파일을 올려주세요", 
-        type=["xlsx", "csv", "pdf"] # pdf 추가
-    )
-
-    if uploaded_file:
-        file_name = uploaded_file.name.lower()
-        
-        try:
-            if file_name.endswith(('.xlsx', '.xls')):
-                # 엑셀 파일 처리
-                df = pd.read_excel(uploaded_file)
-                st.success("✅ 엑셀 파일을 성공적으로 불러왔습니다.")
-                
-            elif file_name.endswith('.csv'):
-                # CSV 파일 처리 (인코딩 문제 방지를 위해 cp949 추가)
-                try:
-                    df = pd.read_csv(uploaded_file, encoding='utf-8')
-                except UnicodeDecodeError:
-                    df = pd.read_csv(uploaded_file, encoding='cp949')
-                st.success("✅ CSV 파일을 성공적으로 불러왔습니다.")
-                
-            elif file_name.endswith('.pdf'):
-                # PDF 파일 처리 (데이터프레임으로 변환하지 않고 텍스트로만 처리)
-                st.info("📄 PDF 파일이 감지되었습니다. 'PDF 데이터 해석' 버튼을 눌러주세요.")
-                df = None  # PDF는 표 형태가 아닐 수 있으므로 None 처리
-                
-            else:
-                st.error("❌ 지원하지 않는 파일 형식입니다.")
-                df = None
-
-            # --- 분석 및 시뮬레이션 버튼 ---
-            if df is not None:
-                st.dataframe(df.head(3)) # 미리보기 표시
-                if st.button("🚛 배차 시뮬레이션 실행"):
-                    analysis_text = analyze_logistics_data(df)
-                    st.session_state.pending_query = analysis_text
-                    st.rerun()
-                    
-            elif file_name.endswith('.pdf'):
-                if file_name.endswith('.pdf'):
-                    if st.button("📄 PDF 데이터 해석"):
-                        # 파일을 읽기 전 포인터를 맨 앞으로 이동
-                        uploaded_file.seek(0)
-                        file_bytes = uploaded_file.read()
-                        
-                        # 함수 호출
-                        pdf_result = analyze_pdf_logistics(file_bytes)
-                        
-                        # 결과 출력 및 채팅 세션 저장
-                        st.session_state.pending_query = pdf_result
-                        st.rerun()
-
-        except Exception as e:
-            st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")      
-        st.markdown("---")           
-        
     # ── 포장량 DB 로드 (하드코딩 완전 제거) ─────────────────────────────
     @st.cache_data(ttl=300)
     def load_packing_db():
@@ -1037,13 +1080,11 @@ with st.sidebar:
                     st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
                     st.write(f"📦 **최대 적재 가능:** {best_truck['max_plt']} PLT")
 
-                    # 컨테이너 기준: 1PLT=1.1×1.1×2.2m=2.662CBM
-                    # 20ft(33.1CBM→12PLT), 40ft(67.5CBM→25PLT)
-                    _PLT_CBM = 1.1 * 1.1 * 2.2
-                    if calc_pallets <= int(33.1 // _PLT_CBM):  # 12 PLT
-                        cntr_type, max_cntr_plt = "20ft", int(33.1 // _PLT_CBM)
+                    # 컨테이너 기준: 20ft(10 PLT), 40ft(20 PLT)
+                    if calc_pallets <= 10:
+                        cntr_type, max_cntr_plt = "20ft", 10
                     else:
-                        cntr_type, max_cntr_plt = "40ft", int(67.5 // _PLT_CBM)
+                        cntr_type, max_cntr_plt = "40ft", 20
 
                     cntr_count = int(
                         (calc_pallets // max_cntr_plt) +
@@ -1073,18 +1114,15 @@ with st.sidebar:
                     st.warning("⚠️ 대량 물량으로 인한 별도 배차 협의가 필요합니다.")
 
             # ── 챗봇 연동 버튼 ────────────────────────────────────────────
-            if st.button("💬 이 결과로 상세 문의하기", use_container_width=True):
-                grp_summary = ", ".join(
-                    f"{g}({group_weights.get(g,0):,.0f}kg)" for g in selected_groups
+            if st.button("📋 시뮬레이터 문의하기", use_container_width=True):
+                grp_summary = ", ".join(f"{g}({group_weights.get(g,0):,.0f}kg)" for g in selected_groups)
+                sim_summary = (
+                    f"포장재: {selected_packing}\n"
+                    f"자재그룹: {grp_summary}\n"
+                    f"목표 중량: {total_target_weight:,.0f}kg\n"
+                    f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT"
                 )
-                query_msg = (
-                    f"자재그룹 {grp_summary}을(를) {selected_packing}으로 포장해서 "
-                    f"총 {total_target_weight:,.0f}kg 수출할 때, "
-                    f"계산된 총 {int(calc_boxes)}박스/{int(calc_pallets)}PLT 외에 "
-                    f"추가로 주의할 적재·통관 사항이 있어?"
-                )
-                st.session_state.pending_query = query_msg
-                st.rerun()
+                show_simulator_inquiry_popup("수출 포장량 시뮬레이터", sim_summary)
         else:
             st.info("자재그룹과 포장재를 선택하시면 시뮬레이션이 시작됩니다.")
 
@@ -1269,12 +1307,14 @@ with st.sidebar:
 <div style="font-size:11px;color:#999;margin-top:4px;">※ 기준: 물류팀 운영 규칙</div>
 """, unsafe_allow_html=True)
 
-            if st.button("💬 이 운임으로 견적 상담하기", use_container_width=True):
-                st.session_state.pending_query = (
-                    f"{destination}({zone_label}) 지역 {total_weight}kg 기준 운임 비교 결과 "
-                    f"(기준 {threshold}kg, 추천: {best_option})를 바탕으로 고객 상담용 멘트를 작성해줘."
+            if st.button("📋 시뮬레이터 문의하기", use_container_width=True):
+                sim_summary = (
+                    f"도착지: {destination} ({zone_label})\n"
+                    f"총 중량: {total_weight:,}kg\n"
+                    f"기준 중량: {threshold:,}kg\n"
+                    f"추천 운송 방식: {best_option}"
                 )
-                st.rerun()
+                show_simulator_inquiry_popup("국내 최적 운임 비교", sim_summary)
 
         # ── 국내 최적 배차 시뮬레이터 (국내영업팀 전용) ─────────────────────
         st.markdown("---")
@@ -1420,8 +1460,11 @@ with st.sidebar:
                     f"계산: {dom_qty} ÷ {max_pc} = {need_plt:.2f} → 올림 {need_plt_ceil} PLT"
                 )
 
-                # ★ 부피 + 중량 이중 기준 차량 추천
-                best_truck = get_db_transport_advice(need_plt_ceil, total_weight_kg)
+                # ★ 파렛트 실물 크기 기반 부피 1순위 차량 추천
+                best_truck = get_db_transport_advice(
+                    need_plt_ceil, total_weight_kg,
+                    plt_w=item['plt_w'], plt_l=item['plt_l']  # 실제 파렛트 사이즈 전달
+                )
                 with st.expander("🚚 최적 배차 추천", expanded=True):
                     if best_truck:
                         if best_truck.get('is_lowbed'):
@@ -1443,15 +1486,15 @@ with st.sidebar:
                     else:
                         st.warning("⚠️ 적합한 차량이 없습니다. 물류팀에 직접 문의하세요.")
 
-                if st.button("💬 이 배차 정보로 문의하기", use_container_width=True, key="dom_truck_query"):
-                    truck_name  = best_truck['name'] if best_truck else "없음"
-                    weight_info = f", 총 중량 {total_weight_kg:,.0f}kg" if weight_per_pc else ""
-                    st.session_state.pending_query = (
-                        f"자재코드 {dom_item_code}({item['name']}), 수량 {dom_qty}PC{weight_info} → "
-                        f"{need_plt_ceil}PLT 기준 배차 추천 결과({truck_name})를 확인했습니다. "
-                        f"실제 배차 가능 여부와 주의사항을 알려줘."
+                if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="dom_truck_query"):
+                    truck_name = best_truck['name'] if best_truck else "없음"
+                    weight_line = f"\n총 중량: {total_weight_kg:,.0f}kg ({total_weight_kg/1000:.2f}ton)" if weight_per_pc else ""
+                    sim_summary = (
+                        f"자재코드: {dom_item_code} ({item['name']})\n"
+                        f"수량: {dom_qty}PC → {need_plt_ceil}PLT{weight_line}\n"
+                        f"추천 차량: {truck_name}"
                     )
-                    st.rerun()
+                    show_simulator_inquiry_popup("국내 최적 배차 시뮬레이터", sim_summary)
         else:
             st.info("자재코드와 수량을 입력하시면 DB 기반으로 최적 차량을 분석합니다.")
 
@@ -1621,8 +1664,11 @@ with st.sidebar:
                     f"계산: {t_qty} ÷ {max_pc} = {need_plt:.2f} → 올림 {need_plt_ceil} PLT"
                 )
 
-                # ★ 차량 추천 - 부피 + 중량 이중 기준
-                best_truck = get_db_transport_advice(need_plt_ceil, total_weight_kg)
+                # ★ 파렛트 실물 크기 기반 부피 1순위 차량 추천
+                best_truck = get_db_transport_advice(
+                    need_plt_ceil, total_weight_kg,
+                    plt_w=item['plt_w'], plt_l=item['plt_l']  # 실제 파렛트 사이즈 전달
+                )
                 with st.expander("🚚 최적 배차 추천", expanded=True):
                     if best_truck:
                         if best_truck.get('is_lowbed'):
@@ -1644,15 +1690,15 @@ with st.sidebar:
                     else:
                         st.warning("⚠️ 적합한 차량이 없습니다. 물류팀에 직접 문의하세요.")
 
-                if st.button("💬 이 배차 정보로 문의하기", use_container_width=True):
+                if st.button("📋 시뮬레이터 문의하기", use_container_width=True):
                     truck_name = best_truck['name'] if best_truck else "없음"
-                    weight_info = f", 총 중량 {total_weight_kg:,.0f}kg" if weight_per_pc else ""
-                    st.session_state.pending_query = (
-                        f"자재코드 {t_item_code}({item['name']}), 수량 {t_qty}PC{weight_info} → "
-                        f"{need_plt_ceil}PLT 기준 배차 추천 결과({truck_name})를 확인했습니다. "
-                        f"실제 배차 가능 여부와 주의사항을 알려줘."
+                    weight_line = f"\n총 중량: {total_weight_kg:,.0f}kg ({total_weight_kg/1000:.2f}ton)" if weight_per_pc else ""
+                    sim_summary = (
+                        f"자재코드: {t_item_code} ({item['name']})\n"
+                        f"수량: {t_qty}PC → {need_plt_ceil}PLT{weight_line}\n"
+                        f"추천 차량: {truck_name}"
                     )
-                    st.rerun()
+                    show_simulator_inquiry_popup("크롤러 배차 시뮬레이터", sim_summary)
         else:
             st.info("자재코드와 수량을 입력하시면 DB 기반으로 최적 차량을 분석합니다.")
                        
