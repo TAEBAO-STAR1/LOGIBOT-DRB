@@ -2028,17 +2028,13 @@ def _calc_loadable_plt(plt_w: float, plt_l: float, car_w: float, car_l: float) -
     return best
 
 
-def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0,
-                             plt_w: float = 1.1, plt_l: float = 1.1):
+def _load_vehicle_candidates(plt_w: float, plt_l: float) -> list:
     """
-    차량 데이터 WHOLE 문서를 파싱해 최적 차량 추천.
-    ─ 1순위: 파렛트 실물 크기(plt_w × plt_l)를 차량 적재함에 실제 배열 가능한 수량으로 판단
-    ─ 2순위: 중량은 참고용(weight_ok 플래그) — 경고 표시용으로만 사용
-    plt_w, plt_l : 파렛트 실제 가로·세로 (m), 기본값 1100×1100mm
+    Qdrant '차량 데이터' 문서에서 차량 후보 목록을 파싱해 반환.
+    각 후보에 파렛트 배열 기반 max_plt 포함.
     """
     try:
         client = QdrantClient(url=QDRANT_HOST)
-
         search_result = client.scroll(
             collection_name="logistics_data",
             scroll_filter=models.Filter(
@@ -2049,89 +2045,273 @@ def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0,
             ),
             limit=10
         )[0]
-
         if not search_result:
-            return None
-
+            return []
         content = search_result[0].payload.get("page_content", "")
-        total_weight_ton = total_weight_kg / 1000.0
+    except Exception as e:
+        logger.error(f"차량 데이터 로드 오류: {e}")
+        return []
 
-        candidates = []
-        lowbed_entry = None
-        for line in content.split('\n'):
-            parts = [p.strip() for p in line.split('|')]
-            if len(parts) < 4:
-                continue
-            name = parts[0]
-            if not name or '톤수' in name or name.startswith('[') or '특이사항' in name or '높이' in name:
-                continue
+    def _parse_max_weight(wt_str: str) -> Optional[float]:
+        """
+        '~ 1.32', '1.33 ~ 2.75', '~ 25 (폭 2.6m 이하)' 등에서
+        차량 최대 허용 중량(ton)만 추출.
+        ─ '폭 Xm' 같은 괄호 내 부가 정보는 제거 후 파싱
+        ─ 범위 표현(A ~ B)이면 상한값(B) 반환
+        """
+        # 괄호 안 내용 제거 (예: "(폭 2.6m 이하)" 제거)
+        cleaned = re.sub(r'\(.*?\)', '', wt_str).strip()
+        nums = re.findall(r'[\d.]+', cleaned)
+        if not nums:
+            return None
+        return float(nums[-1])   # 범위면 상한값, 단일이면 그 값
 
-            is_lowbed = any(kw in name for kw in ('로브이', 'Low-v', 'Low-bed', '로베드', 'low-bed', 'low-v'))
-            if is_lowbed:
-                nums_lb = re.findall(r'[\d.]+', parts[1]) if len(parts) >= 2 else []
-                lowbed_entry = {
-                    "name"          : name,
-                    "spec"          : "높이 2.6m 이상 제품 전용 특수차량",
-                    "max_plt"       : 999,
-                    "max_weight_ton": float(nums_lb[-1]) if nums_lb else None,
-                    "weight_ok"     : True,
-                    "is_lowbed"     : True,
-                }
-                continue
+    vehicles = []
+    for line in content.split('\n'):
+        parts = [p.strip() for p in line.split('|')]
 
-            try:
-                length = float(re.search(r'([\d.]+)m', parts[2]).group(1))
-                width  = float(re.search(r'([\d.]+)m', parts[3]).group(1))
-            except Exception:
-                continue
+        # ★ 첫 컬럼이 빈 문자열이면 제거 (Excel 첫 번째 빈 열 대응)
+        if parts and parts[0] == '':
+            parts = parts[1:]
 
-            max_weight_ton = None
-            if len(parts) >= 2:
-                nums = re.findall(r'[\d.]+', parts[1])
-                if nums:
-                    max_weight_ton = float(nums[-1])
+        if len(parts) < 4:
+            continue
+        name = parts[0]
+        if not name or '톤수' in name or name.startswith('[') or '특이사항' in name or '높이' in name:
+            continue
 
-            # ── 핵심: 파렛트 실물 크기로 실제 배열 가능 수량 계산 ──────────
-            max_plt = _calc_loadable_plt(plt_w, plt_l, width, length)
-
-            if max_plt < total_pallets:
-                continue  # 부피상 적재 불가 → 후보 제외
-
-            weight_ok = True
-            if total_weight_ton > 0 and max_weight_ton is not None:
-                weight_ok = total_weight_ton <= max_weight_ton
-
-            candidates.append({
+        is_lowbed = any(kw in name for kw in ('로브이', 'Low-v', 'Low-bed', '로베드', 'low-bed', 'low-v'))
+        if is_lowbed:
+            vehicles.append({
                 "name"          : name,
-                "spec"          : f"길이 {length}m / 폭 {width}m",
-                "max_plt"       : max_plt,
-                "max_weight_ton": max_weight_ton,
-                "weight_ok"     : weight_ok,
-                "is_lowbed"     : False,
+                "spec"          : "높이 2.6m 이상 제품 전용 특수차량",
+                "max_plt"       : 999,
+                "max_weight_ton": _parse_max_weight(parts[1]) if len(parts) >= 2 else None,
+                "is_lowbed"     : True,
+                "length"        : 0,
+                "width"         : 0,
             })
+            continue
 
-        if not candidates:
+        try:
+            length = float(re.search(r'([\d.]+)m', parts[2]).group(1))
+            width  = float(re.search(r'([\d.]+)m', parts[3]).group(1))
+        except Exception:
+            continue
+
+        max_weight_ton = _parse_max_weight(parts[1]) if len(parts) >= 2 else None
+        max_plt = _calc_loadable_plt(plt_w, plt_l, width, length)
+
+        vehicles.append({
+            "name"          : name,
+            "spec"          : f"길이 {length}m / 폭 {width}m",
+            "max_plt"       : max_plt,
+            "max_weight_ton": max_weight_ton,
+            "is_lowbed"     : False,
+            "length"        : length,
+            "width"         : width,
+        })
+    return vehicles
+
+
+def get_db_transport_advice(total_pallets: float, total_weight_kg: float = 0.0,
+                             plt_w: float = 1.1, plt_l: float = 1.1):
+    """
+    단일 자재 배차 추천 (하위호환 유지).
+    내부적으로 get_split_dispatch_advice 호출 후 첫 번째 차량 반환.
+    """
+    result = get_split_dispatch_advice(
+        items=[{"pallets": total_pallets, "weight_kg": total_weight_kg,
+                "plt_w": plt_w, "plt_l": plt_l}]
+    )
+    if not result or not result.get("trucks"):
+        return None
+    first = result["trucks"][0]
+    return {
+        "name"          : first["name"],
+        "spec"          : first["spec"],
+        "max_plt"       : first["max_plt"],
+        "max_weight_ton": first["max_weight_ton"],
+        "weight_ok"     : first["weight_ok"],
+        "is_lowbed"     : first.get("is_lowbed", False),
+    }
+
+
+def get_split_dispatch_advice(items: list) -> dict:
+    """
+    복수 자재 혼적 또는 단일 자재 분할 배차 추천.
+
+    items: [{"pallets": int, "weight_kg": float, "plt_w": float, "plt_l": float}, ...]
+
+    핵심 설계 원칙:
+    ─ 혼적 시 차량 적재함에서 실제 배열 가능한 PLT 수는
+      '가장 큰 파렛트' 기준으로 계산 (각 자재별 합산 방식 ❌)
+      → 하나의 적재함 공간을 자재들이 공유하기 때문
+    ─ 부피(PLT) + 중량 동시 만족하는 가장 작은 차량 선택
+    ─ 한 차량 불가 → 중량 기준으로 최대한 적재 후 나머지 재귀 분할
+    """
+    try:
+        total_plt       = sum(it["pallets"] for it in items)
+        total_weight_kg = sum(it["weight_kg"] for it in items)
+
+        # 혼적 부피 계산 기준: 가장 큰 파렛트 (면적 = w*l 기준)
+        rep_item    = max(items, key=lambda it: it["plt_w"] * it["plt_l"])
+        rep_plt_w   = rep_item["plt_w"]
+        rep_plt_l   = rep_item["plt_l"]
+
+        # 차량 목록 로드 (대표 파렛트 사이즈 기준 max_plt 계산)
+        all_vehicles = _load_vehicle_candidates(rep_plt_w, rep_plt_l)
+        if not all_vehicles:
+            return {"trucks": [], "total_plt": total_plt, "total_weight_kg": total_weight_kg,
+                    "split": False, "error": "차량 DB를 불러올 수 없습니다."}
+
+        # 일반 차량만, 최대중량 오름차순 정렬 (동일 중량이면 max_plt 오름차순)
+        normal_vehicles = sorted(
+            [v for v in all_vehicles if not v["is_lowbed"]],
+            key=lambda x: (x["max_weight_ton"] or 0, x["max_plt"])
+        )
+
+        def _best_single_vehicle(need_plt: int, need_weight_kg: float) -> Optional[dict]:
+            """
+            need_plt, need_weight_kg 를 단일 차량으로 처리 가능한
+            후보 중 가장 작은 차량 반환.
+            ─ 1순위: 부피 OK + 중량 OK  → 최대중량 기준 가장 작은 차량
+            ─ 2순위: 부피 OK + 중량 초과 → 최대중량 기준 가장 작은 차량 + 경고
+            """
+            need_weight_ton = need_weight_kg / 1000.0
+            ok_both, ok_vol = [], []
+
+            for v in normal_vehicles:
+                # 부피: 대표 파렛트 기준 이 차량에 몇 PLT 올릴 수 있는가
+                cap_plt = v["max_plt"]   # _load_vehicle_candidates에서 이미 계산됨
+                if cap_plt < need_plt:
+                    continue             # 부피 부족 → 제외
+
+                wt_ok = True
+                if need_weight_ton > 0 and v["max_weight_ton"] is not None:
+                    wt_ok = need_weight_ton <= v["max_weight_ton"]
+
+                entry = {
+                    **v,
+                    "weight_ok"         : wt_ok,
+                    "assigned_plt"      : need_plt,
+                    "assigned_weight_kg": need_weight_kg,
+                    "load_ratio_vol"    : (need_plt / cap_plt) * 100,
+                    "load_ratio_wt"     : (
+                        (need_weight_ton / v["max_weight_ton"]) * 100
+                        if v["max_weight_ton"] else 0.0
+                    ),
+                }
+                if wt_ok:
+                    ok_both.append(entry)
+                else:
+                    ok_vol.append(entry)
+
+            if ok_both:
+                # 중량 OK 중 가장 작은 차량 (최대중량 오름차순 → 첫 번째)
+                return ok_both[0]
+            if ok_vol:
+                # 중량 초과지만 부피는 맞는 가장 작은 차량
+                return ok_vol[0]
             return None
 
-        # ── 우선순위 선정 로직 ────────────────────────────────────────────
-        # 1그룹(ok_both): PLT 수 OK + 중량 OK  → 이 중 가장 작은 차량
-        # 2그룹(ok_vol) : PLT 수 OK + 중량 초과 → 불가피 시 사용, weight_ok=False 경고
-        ok_both = [c for c in candidates if c['weight_ok']]
-        ok_vol  = [c for c in candidates if not c['weight_ok']]
+        def _split_dispatch(remain_plt: int, remain_weight_kg: float,
+                            depth: int = 0) -> list:
+            """
+            remain_plt / remain_weight_kg 를 배차.
 
-        if ok_both:
-            # PLT 수 기준으로 가장 작은 차량 (중량도 만족하는 후보 중)
-            return sorted(ok_both, key=lambda x: x['max_plt'])[0]
-        elif ok_vol:
-            # 중량 초과 차량만 남았을 때: 그나마 가장 작은 것 추천 + 경고
-            logger.warning("중량 OK 차량 없음 → 부피 기준 차량 추천 (중량 경고 표시)")
-            return sorted(ok_vol, key=lambda x: x['max_plt'])[0]
-        else:
-            return None
+            전략:
+            1) 단일 차량으로 부피+중량 모두 OK → 즉시 반환
+            2) 불가 시 → 각 차량이 이번에 실을 수 있는 최대 PLT를
+               (부피 cap, 중량 cap 동시 만족) 기준으로 계산하고,
+               '가장 많이 싣되 가장 작은 차량' 선택 → 나머지 재귀
+               (차량 대수를 최소화하면서 각 차량을 최대 활용)
+            """
+            if depth > 30 or remain_plt <= 0:
+                return []
+
+            wt_per_plt = remain_weight_kg / remain_plt if remain_plt > 0 else 0
+
+            # ── 1) 단일 차량 가능한지 먼저 시도 ──────────────────────────
+            best = _best_single_vehicle(remain_plt, remain_weight_kg)
+            if best and best["weight_ok"]:
+                return [best]
+
+            # ── 2) 분할: 각 차량별로 이번에 실을 수 있는 최대 PLT 계산 ──
+            # (부피 한도 & 중량 한도 동시 만족)
+            # 결과: (실을_PLT, 차량) 쌍 중 실을_PLT 최대 → 동률이면 차량 작은 것
+            best_load  = 0          # 이번 차량에 실을 최대 PLT
+            chosen     = None       # 선택된 차량
+            chosen_wkg = 0.0
+
+            for v in normal_vehicles:   # 작은 차량부터 순회
+                cap_vol = v["max_plt"]
+                cap_wt_kg = (v["max_weight_ton"] * 1000.0
+                             if v["max_weight_ton"] else float("inf"))
+
+                # 중량 제약으로 이 차량에 실을 수 있는 최대 PLT
+                if wt_per_plt > 0 and cap_wt_kg < float("inf"):
+                    max_by_wt = int(cap_wt_kg / wt_per_plt)
+                else:
+                    max_by_wt = remain_plt
+
+                load = min(cap_vol, max_by_wt, remain_plt)
+                if load <= 0:
+                    continue
+
+                load_wkg = wt_per_plt * load
+                # 이 차량 중량 OK 재확인
+                if v["max_weight_ton"] and load_wkg / 1000.0 > v["max_weight_ton"]:
+                    continue
+
+                # 더 많이 실을 수 있는 차량 발견 시 갱신
+                # (동률이면 이미 작은 차량이 chosen이므로 갱신 안 함)
+                if load > best_load:
+                    best_load  = load
+                    chosen     = v
+                    chosen_wkg = load_wkg
+
+            # 아무 차량도 선택 못 했으면 가장 큰 차량에 강제 1PLT
+            if chosen is None:
+                chosen    = max(normal_vehicles,
+                                key=lambda x: (x["max_plt"], x["max_weight_ton"] or 0))
+                best_load = 1
+                chosen_wkg = wt_per_plt * best_load
+
+            cap       = chosen["max_plt"]
+            left_plt  = remain_plt - best_load
+            left_wkg  = remain_weight_kg - chosen_wkg
+            wt_ok_f   = (chosen_wkg / 1000.0 <= chosen["max_weight_ton"]
+                         if chosen["max_weight_ton"] else True)
+
+            truck = {
+                **chosen,
+                "weight_ok"         : wt_ok_f,
+                "assigned_plt"      : best_load,
+                "assigned_weight_kg": chosen_wkg,
+                "load_ratio_vol"    : (best_load / cap) * 100,
+                "load_ratio_wt"     : (
+                    (chosen_wkg / 1000.0 / chosen["max_weight_ton"]) * 100
+                    if chosen["max_weight_ton"] else 0.0
+                ),
+            }
+            return [truck] + _split_dispatch(left_plt, left_wkg, depth + 1)
+
+        trucks   = _split_dispatch(total_plt, total_weight_kg)
+        is_split = len(trucks) > 1
+
+        return {
+            "trucks"         : trucks,
+            "total_plt"      : total_plt,
+            "total_weight_kg": total_weight_kg,
+            "split"          : is_split,
+            "error"          : None,
+        }
 
     except Exception as e:
-        logger.error(f"⚠️ DB 배차 조회 중 오류: {e}")
-        return None
+        logger.error(f"⚠️ 분할 배차 계산 오류: {e}")
+        return {"trucks": [], "total_plt": 0, "total_weight_kg": 0,
+                "split": False, "error": str(e)}
 # 메인 함수
 if __name__ == "__main__":
     test_queries = [

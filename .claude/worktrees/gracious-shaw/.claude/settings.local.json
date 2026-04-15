@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp /tmp/app_b900f83.py \"C:\\\\Users\\\\shin.tae.hwan\\\\Desktop\\\\AI Agent\\\\Logibot-DRB\\\\.claude\\\\worktrees\\\\gracious-shaw\\\\app.py\")",
+      "Bash(cp /tmp/query_processor_b900f83.py \"C:\\\\Users\\\\shin.tae.hwan\\\\Desktop\\\\AI Agent\\\\Logibot-DRB\\\\.claude\\\\worktrees\\\\gracious-shaw\\\\rag_pipeline\\\\query_processor.py\")",
+      "Bash(cp /tmp/app_b900f83.py \"C:/Users/shin.tae.hwan/Desktop/AI Agent/Logibot-DRB/.claude/worktrees/gracious-shaw/app.py\")",
+      "Bash(cp /tmp/query_processor_b900f83.py \"C:/Users/shin.tae.hwan/Desktop/AI Agent/Logibot-DRB/rag_pipeline/query_processor.py\")",
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('app.py'\\).read\\(\\)\\); print\\('app.py syntax OK'\\)\")",
+      "Bash(python -c \"import ast, sys; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('app.py syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('rag_pipeline/query_processor.py', encoding='utf-8'\\).read\\(\\)\\); print\\('query_processor.py syntax OK'\\)\")",
+      "Bash(grep -r \"streamlit\\\\|flask\\\\|uvicorn\\\\|gunicorn\" \"C:\\\\Users\\\\shin.tae.hwan\\\\Desktop\\\\AI Agent\\\\Logibot-DRB\" --include=\"*.py\" ! -path \"*\\\\.venv*\")"
+    ]
+  }
+}

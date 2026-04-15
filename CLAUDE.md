@@ -16,7 +16,7 @@ Qdrant 벡터 DB에 인덱싱하고, Ollama 로컬 LLM으로 질의응답을 수
 | 구분 | 내용 |
 |------|------|
 | Frontend / App | Streamlit |
-| LLM | Gemma 3 27B GPTQ (온프레미스, Ollama) |
+| LLM | gpt-oss-120b (온프레미스, Ollama) |
 | Embeddings | `granite-embedding:278m` (Ollama) |
 | Vector DB | Qdrant |
 | 데이터 소스 | Excel (`Logibot-Data_기본__V4.xlsx`), PDF (컨테이너 스펙) |

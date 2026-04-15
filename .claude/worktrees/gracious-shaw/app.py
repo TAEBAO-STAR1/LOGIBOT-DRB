@@ -36,32 +36,7 @@ st.markdown(f"""
     
     .btn-track {{ background-color: {TEAM_CONFIG["트랙영업팀"]["color"]}; }}
     .btn-track:hover {{ background-color: {TEAM_CONFIG["트랙영업팀"]["hover"]}; transform: translateY(-3px); }}
-
-    /* ── 행 삭제 휴지통 버튼: 프레임 완전 제거 ── */
-    button[title="행 삭제"] {{
-        background: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-        padding: 4px 6px !important;
-        font-size: 18px !important;
-        color: var(--text-color) !important;
-        opacity: 0.5;
-        transition: opacity 0.2s, transform 0.15s;
-        min-height: unset !important;
-    }}
-    button[title="행 삭제"]:hover {{
-        background: rgba(239,68,68,0.12) !important;
-        border: none !important;
-        box-shadow: none !important;
-        opacity: 1;
-        transform: scale(1.18);
-        border-radius: 6px !important;
-    }}
-    button[title="행 삭제"]:disabled {{
-        opacity: 0.15 !important;
-        cursor: not-allowed !important;
-    }}
-
+    
 </style>
 """, unsafe_allow_html=True)
 
@@ -140,9 +115,6 @@ def show_bad_feedback_popup(msg_idx: int, query: str, answer: str):
     </div>
     """, unsafe_allow_html=True)
 
-    # ★ 작성자명
-    bf_author = st.text_input("✍️ 작성자", placeholder="이름을 입력하세요", max_chars=30, key="bf_author")
-
     # 사유 선택 (체크박스)
     st.markdown("**불만족 이유를 선택해주세요** (복수 선택 가능)")
     reasons = {
@@ -173,21 +145,17 @@ def show_bad_feedback_popup(msg_idx: int, query: str, answer: str):
 
     with col_submit:
         if st.button("📤 피드백 제출", use_container_width=True, type="primary"):
-            if not bf_author.strip():
-                st.warning("작성자를 입력해주세요.")
-            else:
-                selected = [REASON_LABELS[k] for k, v in reasons.items() if v]
-                reason_text = " / ".join(selected) if selected else "사유 미입력"
-                if extra.strip():
-                    reason_text += f" | 추가의견: {extra.strip()}"
-                reason_text = f"[작성자: {bf_author.strip()}] " + reason_text
+            selected = [REASON_LABELS[k] for k, v in reasons.items() if v]
+            reason_text = " / ".join(selected) if selected else "사유 미입력"
+            if extra.strip():
+                reason_text += f" | 추가의견: {extra.strip()}"
 
-                if (st.session_state.current_id, msg_idx) not in st.session_state.feedback_done:
-                    submit_feedback(query, 0.0, answer, [], reason=reason_text)
-                    st.session_state.feedback_done.add((st.session_state.current_id, msg_idx))
+            if (st.session_state.current_id, msg_idx) not in st.session_state.feedback_done:
+                submit_feedback(query, 0.0, answer, [], reason=reason_text)
+                st.session_state.feedback_done.add((st.session_state.current_id, msg_idx))
 
-                st.toast(f"피드백이 반영되었습니다. 감사합니다! ({bf_author.strip()}) 🙏")
-                st.rerun()
+            st.toast("피드백이 반영되었습니다. 감사합니다! 🙏")
+            st.rerun()
 
     with col_cancel:
         if st.button("취소", use_container_width=True):
@@ -237,282 +205,121 @@ def show_source_popup(sources: list, query: str):
             )
             st.caption(f"🔍 하이라이트 키워드: {' · '.join(keywords) if keywords else '없음'}")
 
-# ── 3D 적재 시각화 팝업 ──────────────────────────────────────────────────────
-@st.dialog("📦 3D 적재 시각화", width="large")
-def show_3d_view_popup(trucks: list, resolved_items: list, mode: str = "truck"):
+# ── 배차 추천 결과 공통 렌더 함수 ────────────────────────────────────────
+def render_truck_advice(best_truck, need_plt_ceil: int, total_weight_kg: float,
+                        weight_per_pc, key_prefix: str = ""):
     """
-    배차 시뮬레이터 결과를 3D 입체로 시각화.
-    mode = "truck"     : 국내/크롤러 배차 결과
-    mode = "container" : 해외 컨테이너 결과
-    trucks: [{"name", "spec", "assigned_plt", "length", "width", ...}, ...]
-    resolved_items: [{"code","name","plt_w","plt_l","pallets","qty"}, ...]
+    get_db_transport_advice 반환값을 렌더링.
+    단일 차량(dict) / 다중 차량({"multi": True, ...}) / 로베드 모두 처리.
+    다크·라이트 모드 모두 대응 (CSS 변수 사용).
     """
-    import plotly.graph_objects as go
-    import math as _math
-
-    # ── 차량/컨테이너 치수 DB ──────────────────────────────────────────────
-    VEHICLE_HEIGHT = 2.2   # 일반 차량 적재함 높이(m) 고정
-    PALLET_HEIGHT  = 1.0   # 파렛트 포함 자재 높이(m) 기본값
-
-    # 컨테이너 내부 치수 (ISO 규격, 단위 m)
-    CONTAINER_DIMS = {
-        "20ft" : {"length": 5.899, "width": 2.348, "height": 2.390},
-        "40ft" : {"length":12.034, "width": 2.348, "height": 2.390},
-        "40HC" : {"length":12.034, "width": 2.348, "height": 2.695},
-        "45ft" : {"length":13.555, "width": 2.348, "height": 2.695},
-    }
-
-    # ── 파렛트 배치 좌표 계산 ──────────────────────────────────────────────
-    def _place_pallets(plt_w, plt_l, car_w, car_l, n_plt):
-        """
-        파렛트(plt_w×plt_l)를 적재함(car_w×car_l)에 배치한 (x,y) 좌표 목록 반환.
-        가로 방향(Y) → 세로 방향(X) 순으로 채움.
-        """
-        positions = []
-        # 방향1: plt_w=폭, plt_l=길이
-        # 방향2: plt_l=폭, plt_w=길이 (90도 회전)
-        best_orient = (plt_w, plt_l)
-        # 더 많이 들어가는 방향 선택
-        cols1 = int(car_w / plt_w) if plt_w <= car_w else 0
-        cols2 = int(car_w / plt_l) if plt_l <= car_w else 0
-        rows1 = int(car_l / plt_l) if cols1 else 0
-        rows2 = int(car_l / plt_w) if cols2 else 0
-        if cols1 * rows1 >= cols2 * rows2:
-            pw, pl = plt_w, plt_l
-            cols   = cols1
-        else:
-            pw, pl = plt_l, plt_w
-            cols   = cols2
-
-        if cols == 0:
-            return positions
-
-        placed = 0
-        row_idx = 0
-        while placed < n_plt:
-            y0 = row_idx * pl
-            if y0 + pl > car_l + 0.001:
-                break
-            for c in range(cols):
-                if placed >= n_plt:
-                    break
-                x0 = c * pw
-                positions.append((x0, y0))
-                placed += 1
-            row_idx += 1
-        return positions
-
-    def _make_box_trace(x, y, z, dx, dy, dz, name, color, opacity=0.75):
-        """Mesh3d 박스 트레이스 생성"""
-        return go.Mesh3d(
-            x=[x,x,x+dx,x+dx, x,x,x+dx,x+dx],
-            y=[y,y+dy,y+dy,y, y,y+dy,y+dy,y],
-            z=[z,z,z,z, z+dz,z+dz,z+dz,z+dz],
-            i=[7,0,0,0,4,4,6,6,4,0,3,2],
-            j=[3,4,1,2,5,6,5,2,0,1,6,3],
-            k=[0,7,2,3,6,7,1,1,5,5,7,6],
-            opacity=opacity,
-            color=color,
-            name=name,
-            showlegend=True,
-            hovertemplate=(
-                f"<b>{name}</b><br>"
-                f"위치: ({x:.2f}, {y:.2f}, {z:.2f})<br>"
-                f"크기: {dx:.2f}m × {dy:.2f}m × {dz:.2f}m<extra></extra>"
-            )
-        )
-
-    def _make_wireframe(lx, ly, lz, color="#888888"):
-        """적재함 외곽선(Wireframe) 생성"""
-        edges = [
-            # 하단
-            ([0,lx],[0,0],[0,0]), ([0,lx],[ly,ly],[0,0]),
-            ([0,0],[0,ly],[0,0]), ([lx,lx],[0,ly],[0,0]),
-            # 상단
-            ([0,lx],[0,0],[lz,lz]), ([0,lx],[ly,ly],[lz,lz]),
-            ([0,0],[0,ly],[lz,lz]), ([lx,lx],[0,ly],[lz,lz]),
-            # 기둥
-            ([0,0],[0,0],[0,lz]), ([lx,lx],[0,0],[0,lz]),
-            ([0,0],[ly,ly],[0,lz]), ([lx,lx],[ly,ly],[0,lz]),
-        ]
-        traces = []
-        for xs, ys, zs in edges:
-            traces.append(go.Scatter3d(
-                x=xs, y=ys, z=zs,
-                mode="lines",
-                line=dict(color=color, width=2),
-                showlegend=False,
-                hoverinfo="skip"
-            ))
-        return traces
-
-    # ── 팔레트 색상 팔레트 ────────────────────────────────────────────────
-    PALETTE = [
-        "#4C9BE8","#F4845F","#63C9A8","#E8C34C","#A878D8",
-        "#E87B8C","#5AC4D4","#C4A35A","#7BE878","#D48878",
-    ]
-
-    # ── 컨테이너 모드 ─────────────────────────────────────────────────────
-    if mode == "container":
-        # trucks 리스트에 컨테이너 타입("20ft"/"40ft") 정보 포함됨
-        if not trucks:
-            st.warning("컨테이너 정보가 없습니다.")
-            return
-
-        cntr_type = trucks[0].get("container_type", "40ft")
-        dims      = CONTAINER_DIMS.get(cntr_type, CONTAINER_DIMS["40ft"])
-        cl, cw, ch = dims["length"], dims["width"], dims["height"]
-
-        total_plt  = trucks[0].get("assigned_plt", 0)
-
-        # 파렛트 배치 (표준 해외 파렛트 1.1×1.1m 기준)
-        plt_w = resolved_items[0].get("plt_w", 1.1) if resolved_items else 1.1
-        plt_l = resolved_items[0].get("plt_l", 1.1) if resolved_items else 1.1
-        positions = _place_pallets(plt_w, plt_l, cw, cl, total_plt)
-
-        fig = go.Figure()
-        # 적재함 외곽
-        for tr in _make_wireframe(cl, cw, ch):
-            fig.add_trace(tr)
-        # 바닥면
-        fig.add_trace(go.Mesh3d(
-            x=[0,cl,cl,0], y=[0,0,cw,cw], z=[0,0,0,0],
-            i=[0,0], j=[1,2], k=[2,3],
-            color="#CCCCCC", opacity=0.15, showlegend=False, hoverinfo="skip"
-        ))
-        # 파렛트 배치
-        item_name = resolved_items[0].get("name","자재") if resolved_items else "자재"
-        for i, (px, py) in enumerate(positions):
-            color = PALETTE[i % len(PALETTE)]
-            fig.add_trace(_make_box_trace(
-                py, px, 0, plt_l, plt_w, PALLET_HEIGHT,
-                name=f"PLT {i+1} ({item_name})", color=color
-            ))
-
-        loaded = len(positions)
-        fig.update_layout(
-            scene=dict(
-                xaxis=dict(range=[0, cl], title="길이 (m)"),
-                yaxis=dict(range=[0, cw], title="폭 (m)"),
-                zaxis=dict(range=[0, ch], title="높이 (m)"),
-                aspectmode="manual",
-                aspectratio=dict(x=cl/cw, y=1, z=ch/cw)
-            ),
-            margin=dict(l=0,r=0,b=0,t=30),
-            legend=dict(font=dict(size=11))
-        )
-        st.markdown(f"**{cntr_type} 컨테이너** | 내부 {cl}×{cw}×{ch}m | "
-                    f"적재 {loaded}/{total_plt} PLT")
-        st.plotly_chart(fig, use_container_width=True)
+    if not best_truck:
+        st.warning("⚠️ 적합한 차량이 없습니다. 물류팀에 직접 문의하세요.")
         return
 
-    # ── 차량 배차 모드 ────────────────────────────────────────────────────
-    valid_trucks = [t for t in trucks if not t.get("is_lowbed")]
-    if not valid_trucks:
-        st.warning("로베드 특수차량은 3D 시각화가 지원되지 않습니다.")
+    total_weight_ton = total_weight_kg / 1000.0
+
+    def _card(label: str, value: str, sub: str = "", color: str = "#3b82f6") -> str:
+        sub_html = (
+            f"<div style='font-size:13px;color:var(--text-color);opacity:0.55;"
+            f"margin-top:4px;'>{sub}</div>"
+        ) if sub else ""
+        return f"""
+<div style="flex:1 1 120px;min-width:120px;background:var(--secondary-background-color);
+     border-radius:10px;padding:14px 16px;border-left:3px solid {color};
+     overflow-wrap:break-word;word-break:break-word;">
+  <div style="font-size:13px;color:var(--text-color);opacity:0.55;margin-bottom:6px;">{label}</div>
+  <div style="font-size:20px;font-weight:700;color:var(--text-color);line-height:1.3;">{value}</div>
+  {sub_html}
+</div>"""
+
+    def _progress_bar(ratio: float) -> str:
+        bar_pct   = min(ratio, 100)
+        bar_color = "#22c55e" if ratio < 80 else "#f59e0b" if ratio <= 100 else "#ef4444"
+        return f"""
+<div style="margin:10px 0 4px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;
+       font-size:14px;color:var(--text-color);margin-bottom:5px;">
+    <span style="opacity:0.65;">적재율</span>
+    <span style="font-weight:700;color:{bar_color};font-size:18px;">{ratio:.1f}%</span>
+  </div>
+  <div style="background:var(--secondary-background-color);border-radius:99px;
+       height:10px;overflow:hidden;">
+    <div style="width:{bar_pct:.1f}%;background:{bar_color};
+         height:10px;border-radius:99px;"></div>
+  </div>
+</div>"""
+
+    # ── 로베드 ───────────────────────────────────────────────────────────
+    if best_truck.get("is_lowbed"):
+        st.info("🚛 **로베드(Low-bed) 차량**\n\n제품 높이 2.6m 이상인 경우 선택하는 특수 차량입니다. 물류팀에 직접 문의하세요.")
         return
 
-    # 분할 배차 시 탭으로 차량 선택
-    if len(valid_trucks) > 1:
-        tab_labels = [f"🚚 차량 {i+1}: {t['name']}" for i, t in enumerate(valid_trucks)]
-        tabs = st.tabs(tab_labels)
-    else:
-        tabs = [st.container()]
+    # ── 다중 차량 ────────────────────────────────────────────────────────
+    if best_truck.get("multi"):
+        trucks = best_truck['trucks']
+        ratio  = best_truck['load_ratio']
+        st.success(f"**최적 배차: {best_truck['desc']}**")
+        for i, t in enumerate(trucks, 1):
+            wt_str     = f"{t['wt_ton']:.2f} ton" if t.get('wt_ton') else "-"
+            max_wt_str = f"{t['max_wt']} ton"     if t.get('max_wt') else "-"
+            border_color = '#10b981' if i == 1 else '#6366f1'
+            icon = '🚛' if i == 1 else '🚐'
+            st.markdown(f"""
+<div style="background:var(--secondary-background-color);border-radius:10px;
+     padding:14px 16px;margin-bottom:8px;border-left:4px solid {border_color};">
+  <div style="font-size:16px;font-weight:700;color:var(--text-color);margin-bottom:10px;">
+    {icon} 차량 {i} — {t['name']}
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;">
+    <div style="flex:1 1 90px;min-width:90px;background:var(--background-color);
+         border-radius:8px;padding:10px 12px;text-align:center;">
+      <div style="font-size:12px;color:var(--text-color);opacity:0.55;margin-bottom:3px;">📦 적재</div>
+      <div style="font-size:18px;font-weight:700;color:var(--text-color);">{t['plt']} PLT</div>
+    </div>
+    <div style="flex:1 1 90px;min-width:90px;background:var(--background-color);
+         border-radius:8px;padding:10px 12px;text-align:center;">
+      <div style="font-size:12px;color:var(--text-color);opacity:0.55;margin-bottom:3px;">⚖️ 중량</div>
+      <div style="font-size:16px;font-weight:700;color:var(--text-color);">{wt_str}</div>
+      <div style="font-size:12px;color:var(--text-color);opacity:0.55;margin-top:2px;">최대 {max_wt_str}</div>
+    </div>
+    <div style="flex:1 1 90px;min-width:90px;background:var(--background-color);
+         border-radius:8px;padding:10px 12px;text-align:center;">
+      <div style="font-size:12px;color:var(--text-color);opacity:0.55;margin-bottom:3px;">📏 제원</div>
+      <div style="font-size:14px;font-weight:600;color:var(--text-color);
+           word-break:break-all;line-height:1.3;">{t['spec']}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+        st.markdown(_progress_bar(ratio), unsafe_allow_html=True)
+        return
 
-    for t_idx, (tab, truck) in enumerate(zip(tabs, valid_trucks)):
-        with tab:
-            # 적재함 치수 파싱 (spec: "길이 9.0m / 폭 2.34m")
-            import re as _re
-            spec = truck.get("spec", "길이 6.2m / 폭 2.34m")
-            ln = _re.search(r'길이\s*([\d.]+)m', spec)
-            wn = _re.search(r'폭\s*([\d.]+)m',  spec)
-            car_l = float(ln.group(1)) if ln else 6.2
-            car_w = float(wn.group(1)) if wn else 2.34
-            car_h = VEHICLE_HEIGHT
+    # ── 단일 차량 ────────────────────────────────────────────────────────
+    ratio = best_truck.get('load_ratio', round((need_plt_ceil / best_truck['max_plt']) * 100, 1))
 
-            assigned_plt = truck.get("assigned_plt", 0)
+    st.success(f"**추천 차량: {best_truck['name']}**")
 
-            # 자재별로 비례 PLT 배분
-            total_all_plt = sum(r.get("pallets", 0) for r in resolved_items) or 1
-            item_assignments = []
-            remain = assigned_plt
-            for ri, r in enumerate(resolved_items):
-                if ri == len(resolved_items) - 1:
-                    n = remain
-                else:
-                    n = max(1, round(r.get("pallets", 0) / total_all_plt * assigned_plt))
-                    n = min(n, remain)
-                item_assignments.append({
-                    **r, "truck_plt": n,
-                    "plt_w": r.get("plt_w", 1.0),
-                    "plt_l": r.get("plt_l", 1.1),
-                })
-                remain -= n
-                if remain <= 0:
-                    break
+    cards_html = '<div style="display:flex;gap:10px;margin:8px 0;flex-wrap:wrap;">'
+    cards_html += _card("📏 적재함 제원", best_truck['spec'], color="#6366f1")
+    cards_html += _card("📦 최대 적재",   f"{best_truck['max_plt']} PLT", color="#10b981")
+    if best_truck.get('max_weight_ton'):
+        cards_html += _card("⚖️ 최대 중량", f"{best_truck['max_weight_ton']} ton", color="#f59e0b")
+    cards_html += '</div>'
+    st.markdown(cards_html, unsafe_allow_html=True)
 
-            # 3D 그리기
-            fig = go.Figure()
-            for tr in _make_wireframe(car_l, car_w, car_h, "#888888"):
-                fig.add_trace(tr)
-            # 바닥면
-            fig.add_trace(go.Mesh3d(
-                x=[0,car_l,car_l,0], y=[0,0,car_w,car_w], z=[0,0,0,0],
-                i=[0,0], j=[1,2], k=[2,3],
-                color="#CCCCCC", opacity=0.12, showlegend=False, hoverinfo="skip"
-            ))
+    st.markdown(_progress_bar(ratio), unsafe_allow_html=True)
 
-            # 자재별 파렛트 배치 (Y=폭 방향, X=길이 방향)
-            cur_x = 0.0   # 길이 방향 현재 위치
-            for ri, ia in enumerate(item_assignments):
-                pw, pl = ia["plt_w"], ia["plt_l"]
-                n = ia["truck_plt"]
-                if n <= 0:
-                    continue
-                color = PALETTE[ri % len(PALETTE)]
-                label = f"{ia.get('code','?')} ({ia.get('name','자재')[:10]})"
-
-                # 이 자재의 파렛트 배치 (남은 적재함 길이 기준)
-                remain_l = car_l - cur_x
-                positions = _place_pallets(pw, pl, car_w, remain_l, n)
-
-                for i, (px, py) in enumerate(positions):
-                    fig.add_trace(_make_box_trace(
-                        cur_x + py, px, 0,
-                        pl, pw, PALLET_HEIGHT,
-                        name=label if i == 0 else f"__hidden_{ri}_{i}",
-                        color=color,
-                    ))
-
-                # 자재가 차지한 길이 만큼 cur_x 진행
-                if positions:
-                    max_y = max(py for _, py in positions)
-                    orient_l = pl if (int(car_w / pw) >= 1) else pw
-                    cur_x += max_y + orient_l
-
-            # 레이아웃
-            a_wkg = truck.get("assigned_weight_kg", 0)
-            rv    = truck.get("load_ratio_vol", 0)
-            fig.update_layout(
-                scene=dict(
-                    xaxis=dict(range=[0, car_l], title="길이 (m)"),
-                    yaxis=dict(range=[0, car_w], title="폭 (m)"),
-                    zaxis=dict(range=[0, car_h], title="높이 (m)"),
-                    aspectmode="manual",
-                    aspectratio=dict(x=car_l/car_w, y=1, z=car_h/car_w),
-                    camera=dict(eye=dict(x=1.5, y=-1.8, z=1.2))
-                ),
-                margin=dict(l=0,r=0,b=0,t=30),
-                legend=dict(font=dict(size=11), x=0, y=1)
-            )
-
-            st.markdown(
-                f"**{truck['name']}** | 적재함 {car_l}×{car_w}×{car_h}m | "
-                f"배정 {assigned_plt}PLT / {a_wkg:,.0f}kg | "
-                f"부피 적재율 **{rv:.1f}%**"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            st.caption("💡 마우스로 회전·확대·이동이 가능합니다. 범례를 클릭하면 특정 자재를 숨길 수 있습니다.")
+    if best_truck.get('plt_over'):
+        st.warning(
+            f"⚠️ 파렛트 배열 기준({best_truck['max_plt']} PLT)을 초과하지만 "
+            f"총 중량({total_weight_ton:.2f} ton)은 허용 범위 내입니다. "
+            f"현장 적재 방식 조정 후 단일 차량 운행이 가능합니다. 물류팀에 확인하세요."
+        )
+    elif weight_per_pc and not best_truck.get('weight_ok', True):
+        st.warning(
+            f"⚠️ 총 중량 {total_weight_ton:.2f} ton이 차량 최대 허용 중량을 초과합니다. "
+            f"물류팀에 별도 협의가 필요합니다."
+        )
 
 # --- RAG 인터페이스 연결(모듈화) ---
 # try:
@@ -539,14 +346,13 @@ def show_3d_view_popup(trucks: list, resolved_items: list, mode: str = "truck"):
 
 # RAG 인터페이스 연결
 try:
-    from rag_pipeline.query_processor import get_rag_response, submit_feedback, analyze_logistics_data, analyze_pdf_logistics, get_db_transport_advice, get_split_dispatch_advice, EMAIL_NOTIFIER
+    from rag_pipeline.query_processor import get_rag_response, submit_feedback, analyze_logistics_data, analyze_pdf_logistics, get_db_transport_advice, EMAIL_NOTIFIER
     import logging
     logger = logging.getLogger(__name__)
 except ImportError:
     def get_rag_response(q, context=None): return {"answer": "답변입니다.", "has_table": False}
     def submit_feedback(q, s, c, src): pass
     def get_db_transport_advice(p, w=0): return None
-    def get_split_dispatch_advice(items): return {"trucks": [], "total_plt": 0, "total_weight_kg": 0, "split": False, "error": "모듈 미연결"}
     class _DummyNotifier:
         enabled = False
         def send_improvement_request(self, content, team): return False
@@ -987,14 +793,13 @@ def make_conversation_title(query: str) -> str:
 
 
 def process_user_query(query):
-    import time as _time
     curr_conv = st.session_state.conversations[st.session_state.current_id]
 
     # [중복 방지]
     if curr_conv["messages"] and curr_conv["messages"][-1].get("content") == query:
         return
 
-    # [생성 중 보호]
+    # [생성 중 보호] — 이미 LLM 호출 중이면 대기열에 저장하고 종료
     if st.session_state.is_generating:
         st.session_state.queued_query = query
         st.toast("⏳ 이전 답변 생성 중입니다. 완료 후 자동으로 처리됩니다.", icon="⏳")
@@ -1016,97 +821,37 @@ def process_user_query(query):
     # 3. 생성 시작 플래그 ON
     st.session_state.is_generating = True
 
-    # ── (3) Skeleton 플레이스홀더 ────────────────────────────────────
-    skeleton_slot = st.empty()
-    skeleton_slot.markdown("""
-<style>
-@keyframes skeleton-wave {
-  0%   { background-position: -400px 0; }
-  100% { background-position: 400px 0; }
-}
-.skel-wrap {
-    padding: 14px 18px;
-    border-radius: 12px;
-    background: var(--secondary-background-color);
-    margin-bottom: 8px;
-    max-width: 82%;
-}
-.skel-bar {
-    height: 13px;
-    border-radius: 6px;
-    margin-bottom: 10px;
-    background: linear-gradient(
-        90deg,
-        rgba(128,128,128,0.10) 25%,
-        rgba(128,128,128,0.22) 50%,
-        rgba(128,128,128,0.10) 75%
-    );
-    background-size: 800px 100%;
-    animation: skeleton-wave 1.4s ease-in-out infinite;
-}
-</style>
-<div class="skel-wrap">
-  <div class="skel-bar" style="width:88%;"></div>
-  <div class="skel-bar" style="width:72%;"></div>
-  <div class="skel-bar" style="width:80%;"></div>
-  <div class="skel-bar" style="width:55%;margin-bottom:0;"></div>
-</div>
-""", unsafe_allow_html=True)
-
     try:
-        # 4. 답변 생성 (백그라운드)
-        response    = get_rag_response(query, context=curr_conv.get("context", []))
-        answer_text = response.get('answer', "")
+        # 4. 답변 생성
+        with st.spinner("🤖 답변 생성 중... (다른 메뉴를 클릭하면 완료 후 반영됩니다)"):
+            response   = get_rag_response(query, context=curr_conv.get("context", []))
+            answer_text = response.get('answer', "")
 
-        # Skeleton 제거
-        skeleton_slot.empty()
+            curr_conv["messages"].append({
+                "role"      : "assistant",
+                "content"   : answer_text,
+                "sources"   : response.get('sources', []),
+                "timestamp" : datetime.now().isoformat(),
+                "has_table" : response.get('has_table', False)
+            })
 
-        # ── (2) 스트리밍 효과 ─────────────────────────────────────────
-        stream_slot = st.empty()
-        displayed   = ""
-        # 글자 단위 출력 (마크다운 렌더링을 위해 chunk 단위로 업데이트)
-        CHUNK = 3          # 한 번에 출력할 글자 수 (속도 조절)
-        DELAY = 0.012      # 초 단위 딜레이
-        body_html_stream, _ = format_answer_display("", False)  # 빈 껍데기 확인용
-
-        for i in range(0, len(answer_text), CHUNK):
-            displayed = answer_text[: i + CHUNK]
-            _body, _ = format_answer_display(displayed, False)
-            stream_slot.markdown(
-                f'<div class="chat-bubble assistant">{_body}</div>',
-                unsafe_allow_html=True
-            )
-            _time.sleep(DELAY)
-
-        # 최종 완성본으로 교체
-        stream_slot.empty()
-
-        # 5. 메시지 저장
-        curr_conv["messages"].append({
-            "role"      : "assistant",
-            "content"   : answer_text,
-            "sources"   : response.get('sources', []),
-            "timestamp" : datetime.now().isoformat(),
-            "has_table" : response.get('has_table', False)
-        })
-
-        # 6. 대화 컨텍스트 누적 (최대 10턴)
-        MAX_CONTEXT_TURNS = 10
-        if "context" not in curr_conv:
-            curr_conv["context"] = []
-        curr_conv["context"].append({
-            "query"    : query,
-            "answer"   : answer_text,
-            "timestamp": datetime.now().isoformat()
-        })
-        if len(curr_conv["context"]) > MAX_CONTEXT_TURNS:
-            curr_conv["context"] = curr_conv["context"][-MAX_CONTEXT_TURNS:]
+            # 5. 대화 컨텍스트 누적 (최대 10턴)
+            MAX_CONTEXT_TURNS = 10
+            if "context" not in curr_conv:
+                curr_conv["context"] = []
+            curr_conv["context"].append({
+                "query"    : query,
+                "answer"   : answer_text,
+                "timestamp": datetime.now().isoformat()
+            })
+            if len(curr_conv["context"]) > MAX_CONTEXT_TURNS:
+                curr_conv["context"] = curr_conv["context"][-MAX_CONTEXT_TURNS:]
 
     finally:
-        skeleton_slot.empty()
+        # 6. 생성 완료 — 무조건 플래그 해제 (예외 발생해도 잠금 풀림)
         st.session_state.is_generating = False
 
-    # 7. 대기 중인 질문 처리
+    # 7. 대기 중인 질문이 있으면 pending으로 넘겨 다음 rerun에서 처리
     if st.session_state.queued_query:
         st.session_state.pending_query = st.session_state.queued_query
         st.session_state.queued_query  = None
@@ -1121,7 +866,7 @@ with st.sidebar:
             '<div style="background:#fef3c7;border:1px solid #f59e0b;border-radius:8px;'
             'padding:10px 14px;margin-bottom:10px;font-size:13px;color:#92400e;">'
             '⏳ <strong>답변 생성 중...</strong><br>'
-            '<span style="font-size:11px;">채팅 화면에서 진행 상황을 확인하세요</span>'
+            '<span style="font-size:11px;">완료 후 다른 메뉴가 활성화됩니다</span>'
             '</div>',
             unsafe_allow_html=True
         )
@@ -1485,39 +1230,15 @@ with st.sidebar:
                     st.warning("⚠️ 대량 물량으로 인한 별도 배차 협의가 필요합니다.")
 
             # ── 챗봇 연동 버튼 ────────────────────────────────────────────
-            _btn3d_cntr, _btnq_cntr = st.columns([1, 1])
-            with _btn3d_cntr:
-                if st.button("🧊 3D 입체 보기", use_container_width=True, key="cntr_3d_btn"):
-                    # 컨테이너 타입 결정
-                    _cntr_type = "20ft" if int(calc_pallets) <= 10 else "40ft"
-                    _cntr_plt  = 10 if _cntr_type == "20ft" else 20
-                    _used_plt  = int(calc_pallets) % _cntr_plt or _cntr_plt
-                    _cntr_trucks = [{
-                        "name"          : f"{_cntr_type} 컨테이너",
-                        "spec"          : f"컨테이너 {_cntr_type}",
-                        "assigned_plt"  : _used_plt,
-                        "container_type": _cntr_type,
-                        "is_lowbed"     : False,
-                    }]
-                    # resolved_items에서 파렛트 정보 추출 (없으면 기본값)
-                    _cntr_items = []
-                    grp = selected_groups[0] if selected_groups else "B01"
-                    _cntr_items = [{"name": grp, "code": grp, "plt_w": 1.1, "plt_l": 1.1, "pallets": _used_plt}]
-                    show_3d_view_popup(
-                        trucks=_cntr_trucks,
-                        resolved_items=_cntr_items,
-                        mode="container"
-                    )
-            with _btnq_cntr:
-                if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="cntr_query_btn"):
-                    grp_summary = ", ".join(f"{g}({group_weights.get(g,0):,.0f}kg)" for g in selected_groups)
-                    sim_summary = (
-                        f"포장재: {selected_packing}\n"
-                        f"자재그룹: {grp_summary}\n"
-                        f"목표 중량: {total_target_weight:,.0f}kg\n"
-                        f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT"
-                    )
-                    show_simulator_inquiry_popup("수출 포장량 시뮬레이터", sim_summary)
+            if st.button("📋 시뮬레이터 문의하기", use_container_width=True):
+                grp_summary = ", ".join(f"{g}({group_weights.get(g,0):,.0f}kg)" for g in selected_groups)
+                sim_summary = (
+                    f"포장재: {selected_packing}\n"
+                    f"자재그룹: {grp_summary}\n"
+                    f"목표 중량: {total_target_weight:,.0f}kg\n"
+                    f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT"
+                )
+                show_simulator_inquiry_popup("수출 포장량 시뮬레이터", sim_summary)
         else:
             st.info("자재그룹과 포장재를 선택하시면 시뮬레이션이 시작됩니다.")
 
@@ -1715,519 +1436,168 @@ with st.sidebar:
         st.markdown("---")
         st.subheader("🚛 최적 배차 시뮬레이터", divider="rainbow")
 
-        # ── 공통 데이터 로드 ────────────────────────────────────────────────
-        @st.cache_data(ttl=300)
-        def load_crawler_data_dom():
-            import glob as _glob
-            CRAWLER_SHEET_KEYWORD = "크롤러"
-            search_paths = (
-                _glob.glob("data/source_docs/*V4*.xlsx") +
-                _glob.glob("data/source_docs/*V3*.xlsx") +
-                _glob.glob("data/source_docs/*.xlsx") +
-                _glob.glob("/mnt/user-data/uploads/*V4*.xlsx") +
-                _glob.glob("/mnt/user-data/uploads/*.xlsx")
-            )
-            df = None
-            for path in search_paths:
-                try:
-                    xf = pd.ExcelFile(path)
-                    crawler_sheet = next(
-                        (s for s in xf.sheet_names if CRAWLER_SHEET_KEYWORD in s), None
-                    )
-                    if not crawler_sheet:
-                        continue
-                    df_test = pd.read_excel(path, sheet_name=crawler_sheet, header=0, nrows=2)
-                    first_col = str(df_test.columns[0])
-                    if first_col.startswith("[") or "Unnamed" in first_col:
-                        df = pd.read_excel(path, sheet_name=crawler_sheet, header=1).fillna("")
-                    else:
-                        df = pd.read_excel(path, sheet_name=crawler_sheet, header=0).fillna("")
-                    break
-                except Exception:
-                    continue
-            if df is None:
-                return {}
-            cols = df.columns.tolist()
-            def find_col(kw):
-                return next((c for c in cols if kw in str(c)), None)
-            code_col   = find_col("자재코드")
-            name_col   = find_col("자재내역")
-            qty_col    = find_col("최대 적재 수량") or find_col("적재 수량")
-            size_col   = find_col("사이즈")
-            weight_col = find_col("중량") or find_col("KG") or find_col("kg")
-            if not code_col:
-                return {}
-            data = {}
-            for _, row in df.iterrows():
-                code = str(row.get(code_col, "")).strip().split(".")[0].strip()
-                if not code or code in ("nan", ""):
-                    continue
-                size_raw = str(row.get(size_col, "1000*1100")).strip() if size_col else "1000*1100"
-                try:
-                    w_mm, l_mm = [float(x) for x in size_raw.replace("×", "*").split("*")]
-                except Exception:
-                    w_mm, l_mm = 1000.0, 1100.0
-                try:
-                    max_pc = int(float(str(row.get(qty_col, 1)).strip())) if qty_col else 1
-                except Exception:
-                    max_pc = 1
-                weight_per_pc = None
-                if weight_col:
+        with st.container(border=True):
+            dom_item_code = st.text_input(
+                "🔖 자재코드", placeholder="예: 6004216", key="dom_item_code"
+            ).strip().split(".")[0].strip()
+            dom_qty = st.number_input("📦 수량 (PC)", min_value=1, value=1, key="dom_qty")
+
+        if dom_item_code:
+            # 크롤러 데이터 로드 (load_crawler_data 재사용)
+            @st.cache_data(ttl=300)
+            def load_crawler_data_dom():
+                import glob as _glob
+                CRAWLER_SHEET_KEYWORD = "크롤러"
+                search_paths = (
+                    _glob.glob("data/source_docs/*V4*.xlsx") +
+                    _glob.glob("data/source_docs/*V3*.xlsx") +
+                    _glob.glob("data/source_docs/*.xlsx") +
+                    _glob.glob("/mnt/user-data/uploads/*V4*.xlsx") +
+                    _glob.glob("/mnt/user-data/uploads/*.xlsx")
+                )
+                df = None
+                for path in search_paths:
                     try:
-                        val = str(row.get(weight_col, "")).strip()
-                        if val and val not in ("nan", ""):
-                            weight_per_pc = float(val)
+                        xf = pd.ExcelFile(path)
+                        crawler_sheet = next(
+                            (s for s in xf.sheet_names if CRAWLER_SHEET_KEYWORD in s), None
+                        )
+                        if not crawler_sheet:
+                            continue
+                        df_test = pd.read_excel(path, sheet_name=crawler_sheet, header=0, nrows=2)
+                        first_col = str(df_test.columns[0])
+                        if first_col.startswith("[") or "Unnamed" in first_col:
+                            df = pd.read_excel(path, sheet_name=crawler_sheet, header=1).fillna("")
+                        else:
+                            df = pd.read_excel(path, sheet_name=crawler_sheet, header=0).fillna("")
+                        break
                     except Exception:
-                        weight_per_pc = None
-                data[code] = {
-                    "name"         : str(row.get(name_col, "")).strip() if name_col else "",
-                    "max_pc"       : max_pc,
-                    "plt_w"        : w_mm / 1000,
-                    "plt_l"        : l_mm / 1000,
-                    "weight_per_pc": weight_per_pc,
-                }
-            return data
+                        continue
+                if df is None:
+                    return {}
+                cols = df.columns.tolist()
+                def find_col(kw):
+                    return next((c for c in cols if kw in str(c)), None)
+                code_col   = find_col("자재코드")
+                name_col   = find_col("자재내역")
+                qty_col    = find_col("최대 적재 수량") or find_col("적재 수량")
+                size_col   = find_col("사이즈")
+                weight_col = find_col("중량") or find_col("KG") or find_col("kg")  # ★ 중량 탐지
+                if not code_col:
+                    return {}
+                data = {}
+                for _, row in df.iterrows():
+                    code = str(row.get(code_col, "")).strip().split(".")[0].strip()
+                    if not code or code in ("nan", ""):
+                        continue
+                    size_raw = str(row.get(size_col, "1000*1100")).strip() if size_col else "1000*1100"
+                    try:
+                        w_mm, l_mm = [float(x) for x in size_raw.replace("×", "*").split("*")]
+                    except Exception:
+                        w_mm, l_mm = 1000.0, 1100.0
+                    try:
+                        max_pc = int(float(str(row.get(qty_col, 1)).strip())) if qty_col else 1
+                    except Exception:
+                        max_pc = 1
+                    weight_per_pc = None
+                    if weight_col:
+                        try:
+                            val = str(row.get(weight_col, "")).strip()
+                            if val and val not in ("nan", ""):
+                                weight_per_pc = float(val)
+                        except Exception:
+                            weight_per_pc = None
+                    data[code] = {
+                        "name"         : str(row.get(name_col, "")).strip() if name_col else "",
+                        "max_pc"       : max_pc,
+                        "plt_w"        : w_mm / 1000,
+                        "plt_l"        : l_mm / 1000,
+                        "weight_per_pc": weight_per_pc,   # ★ kg/PC
+                    }
+                return data
 
-        DOM_CRAWLER_DATA = load_crawler_data_dom()
+            DOM_CRAWLER_DATA = load_crawler_data_dom()
+            item = DOM_CRAWLER_DATA.get(dom_item_code)
 
-        # ── 배차 결과 렌더링 헬퍼 ───────────────────────────────────────────
-        def _render_dispatch_result(dispatch_result, sim_key_suffix=""):
-            """분할·단일 배차 결과를 가독성 높은 카드로 렌더링"""
-            import math as _math
+            if not item:
+                partials = [c for c in DOM_CRAWLER_DATA if dom_item_code in c]
+                if partials:
+                    st.warning(f"정확한 코드를 찾지 못했습니다. 유사 코드: {', '.join(partials[:5])}")
+                else:
+                    st.error("❌ 등록되지 않은 자재코드입니다. DB를 확인해주세요.")
+            else:
+                st.markdown(f"**자재내역:** `{item['name']}`")
 
-            trucks           = dispatch_result.get("trucks", [])
-            total_plt        = dispatch_result.get("total_plt", 0)
-            total_weight_kg  = dispatch_result.get("total_weight_kg", 0.0)
-            is_split         = dispatch_result.get("split", False)
-            error            = dispatch_result.get("error")
+                max_pc        = item['max_pc']
+                need_plt      = dom_qty / max_pc
+                need_plt_ceil = -(-dom_qty // max_pc)
 
-            if error:
-                st.warning(f"⚠️ {error}")
-                return
+                # ★ 총 중량 계산
+                weight_per_pc   = item.get('weight_per_pc')
+                total_weight_kg = (weight_per_pc * dom_qty) if weight_per_pc else 0.0
 
-            if not trucks:
-                st.warning("⚠️ 적합한 차량이 없습니다. 물류팀에 직접 문의하세요.")
-                return
-
-            # ── 공통 CSS (라이트·다크 모두 대응) ──────────────────────────
-            st.markdown("""
-<style>
-.dispatch-card {
-    border-radius: 12px;
-    padding: 16px 18px;
-    margin-bottom: 12px;
-    border: 1.5px solid rgba(128,128,128,0.2);
-    background: var(--secondary-background-color);
-}
-.dispatch-card-header {
-    font-size: 15px;
-    font-weight: 700;
-    margin-bottom: 10px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-color);
-}
-.dispatch-badge {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.3px;
-}
-.badge-ok   { background: rgba(34,197,94,0.18); color: #16a34a; }
-.badge-warn { background: rgba(234,179,8,0.18);  color: #b45309; }
-.badge-split{ background: rgba(59,130,246,0.18); color: #1d4ed8; }
-.dispatch-row {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 8px;
-    flex-wrap: wrap;
-}
-.dispatch-cell {
-    flex: 1;
-    min-width: 80px;
-    background: rgba(128,128,128,0.08);
-    border-radius: 8px;
-    padding: 8px 10px;
-    text-align: center;
-}
-.dispatch-cell-label {
-    font-size: 11px;
-    color: var(--text-color);
-    opacity: 0.6;
-    margin-bottom: 3px;
-    white-space: nowrap;
-}
-.dispatch-cell-value {
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--text-color);
-    word-break: break-word;
-}
-.dispatch-cell-sub {
-    font-size: 11px;
-    color: var(--text-color);
-    opacity: 0.55;
-    margin-top: 1px;
-}
-.ratio-bar-wrap {
-    margin: 6px 0 2px;
-    background: rgba(128,128,128,0.12);
-    border-radius: 20px;
-    height: 8px;
-    overflow: hidden;
-}
-.ratio-bar-fill-ok   { height: 8px; border-radius: 20px; background: linear-gradient(90deg,#22c55e,#4ade80); }
-.ratio-bar-fill-warn { height: 8px; border-radius: 20px; background: linear-gradient(90deg,#f59e0b,#fbbf24); }
-.ratio-bar-fill-over { height: 8px; border-radius: 20px; background: linear-gradient(90deg,#ef4444,#f87171); }
-.dispatch-divider {
-    border: none;
-    border-top: 1.5px dashed rgba(128,128,128,0.3);
-    margin: 14px 0;
-}
-.dispatch-summary-box {
-    border-radius: 10px;
-    padding: 12px 16px;
-    margin-bottom: 14px;
-    background: rgba(59,130,246,0.08);
-    border: 1.5px solid rgba(59,130,246,0.2);
-    color: var(--text-color);
-    font-size: 13px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-            # ── 상단 요약 박스 ─────────────────────────────────────────────
-            split_badge = (
-                '<span class="dispatch-badge badge-split">🔀 분할 배차</span>'
-                if is_split else
-                '<span class="dispatch-badge badge-ok">✅ 단일 배차</span>'
-            )
-            st.markdown(f"""
-<div class="dispatch-summary-box">
-  <strong>배차 요약</strong> &nbsp;{split_badge}<br>
-  <span style="opacity:0.7;">총 파렛트 {total_plt} PLT &nbsp;|&nbsp;
-  총 중량 {total_weight_kg:,.0f} kg ({total_weight_kg/1000:.2f} ton) &nbsp;|&nbsp;
-  차량 {len(trucks)}대</span>
-</div>
-""", unsafe_allow_html=True)
-
-            # ── 차량별 카드 ────────────────────────────────────────────────
-            for idx, truck in enumerate(trucks, 1):
-                if truck.get("is_lowbed"):
-                    st.markdown(f"""
-<div class="dispatch-card">
-  <div class="dispatch-card-header">🚛 차량 {idx} &nbsp;
-    <span class="dispatch-badge badge-warn">로베드 특수차량</span>
+                st.markdown("#### 📊 적재 계산")
+                st.markdown(f"""
+<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+  <div style="flex:1 1 90px;min-width:90px;background:var(--secondary-background-color);
+       border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:13px;color:var(--text-color);opacity:0.6;margin-bottom:4px;">수량</div>
+    <div style="font-size:20px;font-weight:700;color:var(--text-color);">{dom_qty} PC</div>
   </div>
-  <p style="font-size:13px;color:var(--text-color);opacity:0.8;margin:0;">
-    제품 높이 2.6m 이상 전용 특수 차량입니다. 물류팀에 직접 문의하세요.
-  </p>
+  <div style="flex:1 1 90px;min-width:90px;background:var(--secondary-background-color);
+       border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:13px;color:var(--text-color);opacity:0.6;margin-bottom:4px;">PLT당 최대</div>
+    <div style="font-size:20px;font-weight:700;color:var(--text-color);">{max_pc} PC</div>
+  </div>
+  <div style="flex:1 1 90px;min-width:90px;background:var(--secondary-background-color);
+       border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:13px;color:var(--text-color);opacity:0.6;margin-bottom:4px;">필요 파렛트</div>
+    <div style="font-size:20px;font-weight:700;color:var(--text-color);">{need_plt_ceil} PLT</div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
-                    continue
 
-                weight_ok   = truck.get("weight_ok", True)
-                rv          = truck.get("load_ratio_vol", 0)
-                rw          = truck.get("load_ratio_wt",  0)
-                a_plt       = truck.get("assigned_plt", 0)
-                a_wkg       = truck.get("assigned_weight_kg", 0.0)
-                max_wton    = truck.get("max_weight_ton")
+                if weight_per_pc:
+                    st.markdown(f"""
+<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+  <div style="flex:1 1 90px;min-width:90px;background:var(--secondary-background-color);
+       border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:13px;color:var(--text-color);opacity:0.6;margin-bottom:4px;">1PC당 중량</div>
+    <div style="font-size:20px;font-weight:700;color:var(--text-color);">{weight_per_pc:,.1f} kg</div>
+  </div>
+  <div style="flex:1 1 90px;min-width:90px;background:var(--secondary-background-color);
+       border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:13px;color:var(--text-color);opacity:0.6;margin-bottom:4px;">총 중량</div>
+    <div style="font-size:20px;font-weight:700;color:var(--text-color);">{total_weight_kg:,.0f} kg</div>
+    <div style="font-size:13px;color:var(--text-color);opacity:0.55;margin-top:3px;">({total_weight_kg/1000:.2f} ton)</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-                status_badge = (
-                    '<span class="dispatch-badge badge-ok">중량 OK</span>'
-                    if weight_ok else
-                    '<span class="dispatch-badge badge-warn">⚠️ 중량 초과</span>'
+                st.caption(
+                    f"파렛트 사이즈: {int(item['plt_w']*1000)} × {int(item['plt_l']*1000)} mm  |  "
+                    f"계산: {dom_qty} ÷ {max_pc} = {need_plt:.2f} → 올림 {need_plt_ceil} PLT"
                 )
 
-                vol_fill_cls = "ratio-bar-fill-ok" if rv <= 90 else ("ratio-bar-fill-warn" if rv <= 100 else "ratio-bar-fill-over")
-                wt_fill_cls  = "ratio-bar-fill-ok" if rw <= 90 else ("ratio-bar-fill-warn" if rw <= 100 else "ratio-bar-fill-over")
-                vol_pct      = min(rv, 100)
-                wt_pct       = min(rw, 100)
+                best_truck = get_db_transport_advice(
+                    need_plt_ceil, total_weight_kg,
+                    plt_w=item['plt_w'], plt_l=item['plt_l']
+                )
+                with st.expander("🚚 최적 배차 추천", expanded=True):
+                    render_truck_advice(best_truck, need_plt_ceil, total_weight_kg,
+                                        weight_per_pc, key_prefix="dom")
 
-                max_wton_str = f"{max_wton} ton" if max_wton else "정보없음"
-                wt_row_html  = ""
-                if max_wton:
-                    wt_row_html = f"""
-  <div class="dispatch-row">
-    <div class="dispatch-cell" style="flex:2;">
-      <div class="dispatch-cell-label">중량 적재율</div>
-      <div class="dispatch-cell-value">{rw:.1f}%</div>
-      <div class="ratio-bar-wrap"><div class="{wt_fill_cls}" style="width:{wt_pct}%;"></div></div>
-      <div class="dispatch-cell-sub">{a_wkg/1000:.2f} ton / {max_wton_str}</div>
-    </div>
-    <div class="dispatch-cell" style="flex:2;">
-      <div class="dispatch-cell-label">부피 적재율</div>
-      <div class="dispatch-cell-value">{rv:.1f}%</div>
-      <div class="ratio-bar-wrap"><div class="{vol_fill_cls}" style="width:{vol_pct}%;"></div></div>
-      <div class="dispatch-cell-sub">{a_plt} PLT / {truck['max_plt']} PLT</div>
-    </div>
-  </div>"""
-
-                warn_html = ""
-                if not weight_ok:
-                    warn_html = f"""
-  <div style="margin-top:8px;padding:8px 12px;background:rgba(234,179,8,0.12);
-              border-left:3px solid #f59e0b;border-radius:6px;
-              font-size:12px;color:var(--text-color);">
-    ⚠️ 적재 중량 {a_wkg/1000:.2f}ton 이 차량 허용 중량 {max_wton_str}을 초과합니다.
-    물류팀과 별도 협의가 필요합니다.
-  </div>"""
-
-                st.markdown(f"""
-<div class="dispatch-card">
-  <div class="dispatch-card-header">
-    🚚 차량 {idx} &nbsp;{status_badge}
-  </div>
-  <div class="dispatch-row">
-    <div class="dispatch-cell" style="flex:3;text-align:left;">
-      <div class="dispatch-cell-label">추천 차량</div>
-      <div class="dispatch-cell-value" style="font-size:15px;">{truck['name']}</div>
-      <div class="dispatch-cell-sub">{truck['spec']}</div>
-    </div>
-    <div class="dispatch-cell">
-      <div class="dispatch-cell-label">배정 PLT</div>
-      <div class="dispatch-cell-value">{a_plt}</div>
-      <div class="dispatch-cell-sub">/ {truck['max_plt']} 최대</div>
-    </div>
-    <div class="dispatch-cell">
-      <div class="dispatch-cell-label">배정 중량</div>
-      <div class="dispatch-cell-value">{a_wkg:,.0f} kg</div>
-      <div class="dispatch-cell-sub">({a_wkg/1000:.2f} ton)</div>
-    </div>
-  </div>
-  {wt_row_html}
-  {warn_html}
-</div>
-""", unsafe_allow_html=True)
-
-            # ── 산출 근거 (접기) ────────────────────────────────────────────
-            with st.expander("📐 산출 근거 보기"):
-                for idx, truck in enumerate(trucks, 1):
-                    if truck.get("is_lowbed"):
-                        st.write(f"**차량 {idx}:** 로베드 특수차량")
-                        continue
-                    max_wton = truck.get("max_weight_ton")
-                    a_plt    = truck.get("assigned_plt", 0)
-                    a_wkg    = truck.get("assigned_weight_kg", 0.0)
-                    weight_ok = truck.get("weight_ok", True)
-                    wt_check = (
-                        f"✅ {a_wkg/1000:.2f}ton ≤ {max_wton}ton (중량 OK)"
-                        if weight_ok else
-                        f"⚠️ {a_wkg/1000:.2f}ton > {max_wton}ton (중량 초과)"
-                    ) if max_wton else "중량 정보 없음"
-                    st.write(f"""**차량 {idx}: {truck['name']}**
-- 적재함: {truck['spec']}
-- 부피: {a_plt}PLT 배정 / 최대 {truck['max_plt']}PLT → {truck.get('load_ratio_vol',0):.1f}%
-- 중량: {wt_check}""")
-
-        # ── 자재 행 관리 세션 ───────────────────────────────────────────────
-        if "dom_sim_items" not in st.session_state:
-            st.session_state.dom_sim_items = [{"code": "", "qty": 1}]
-
-        def _add_dom_item():
-            st.session_state.dom_sim_items.append({"code": "", "qty": 1})
-
-        def _del_dom_item(i):
-            if len(st.session_state.dom_sim_items) > 1:
-                st.session_state.dom_sim_items.pop(i)
-
-        # ── 입력 UI ─────────────────────────────────────────────────────────
-        with st.container(border=True):
-            st.markdown("##### 📦 자재 입력")
-            for i, row_item in enumerate(st.session_state.dom_sim_items):
-                col_code, col_qty, col_del = st.columns([3, 2, 0.7])
-                with col_code:
-                    new_code = st.text_input(
-                        f"자재코드 {i+1}", value=row_item["code"],
-                        placeholder="예: 6004216",
-                        key=f"dom_code_{i}"
-                    ).strip().split(".")[0].strip()
-                    st.session_state.dom_sim_items[i]["code"] = new_code
-                with col_qty:
-                    new_qty = st.number_input(
-                        f"수량{i+1} (PC)", min_value=1,
-                        value=row_item["qty"],
-                        key=f"dom_qty_{i}"
+                if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="dom_truck_query"):
+                    truck_name = best_truck['name'] if best_truck else "없음"
+                    weight_line = f"\n총 중량: {total_weight_kg:,.0f}kg ({total_weight_kg/1000:.2f}ton)" if weight_per_pc else ""
+                    sim_summary = (
+                        f"자재코드: {dom_item_code} ({item['name']})\n"
+                        f"수량: {dom_qty}PC → {need_plt_ceil}PLT{weight_line}\n"
+                        f"추천 차량: {truck_name}"
                     )
-                    st.session_state.dom_sim_items[i]["qty"] = new_qty
-                with col_del:
-                    st.markdown("<div style='margin-top:26px;text-align:center;'>", unsafe_allow_html=True)
-                    if st.button("🗑️", key=f"dom_del_{i}", help="행 삭제",
-                                 disabled=len(st.session_state.dom_sim_items) == 1,
-                                 use_container_width=False):
-                        _del_dom_item(i)
-                        st.rerun()
-                    st.markdown("</div>", unsafe_allow_html=True)
-
-            if st.button("자재 추가 (혼적)", use_container_width=True, key="dom_add_item"):
-                _add_dom_item()
-                st.rerun()
-
-        # ── 계산 실행 ────────────────────────────────────────────────────────
-        active_items = [
-            it for it in st.session_state.dom_sim_items if it["code"].strip()
-        ]
-
-        if not active_items:
-            st.info("자재코드와 수량을 입력하시면 DB 기반으로 최적 차량을 분석합니다.")
+                    show_simulator_inquiry_popup("국내 최적 배차 시뮬레이터", sim_summary)
         else:
-            # 자재별 조회 및 검증
-            resolved, errors = [], []
-            for it in active_items:
-                code = it["code"]
-                qty  = it["qty"]
-                db_item = DOM_CRAWLER_DATA.get(code)
-                if not db_item:
-                    partials = [c for c in DOM_CRAWLER_DATA if code in c]
-                    if partials:
-                        errors.append(f"**{code}**: 정확한 코드 없음. 유사: {', '.join(partials[:3])}")
-                    else:
-                        errors.append(f"**{code}**: DB에 없는 코드입니다.")
-                    continue
-                max_pc        = db_item['max_pc']
-                need_plt_ceil = -(-qty // max_pc)
-                weight_per_pc = db_item.get('weight_per_pc')
-                total_wkg     = (weight_per_pc * qty) if weight_per_pc else 0.0
-                resolved.append({
-                    "code"    : code,
-                    "name"    : db_item['name'],
-                    "qty"     : qty,
-                    "max_pc"  : max_pc,
-                    "pallets" : need_plt_ceil,
-                    "weight_kg": total_wkg,
-                    "plt_w"   : db_item['plt_w'],
-                    "plt_l"   : db_item['plt_l'],
-                    "weight_per_pc": weight_per_pc,
-                })
-
-            for e in errors:
-                st.warning(e)
-
-            if resolved:
-                # ── 자재별 적재 계산 카드 ─────────────────────────────────
-                st.markdown("#### 📊 자재별 적재 계산")
-                for r in resolved:
-                    need_plt = r['qty'] / r['max_pc']
-                    plt_size = f"{int(r['plt_w']*1000)} × {int(r['plt_l']*1000)} mm"
-                    w_pc     = r['weight_per_pc']
-                    w_total  = r['weight_kg']
-
-                    # 자재명 전체 표시 (잘림 방지) — 중량 셀은 사전 변수로 분리
-                    if w_pc:
-                        _weight_cells_dom = (
-                            '<div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);'
-                            'border-radius:8px;padding:7px 10px;text-align:center;">'
-                            '<div style="font-size:11px;opacity:0.6;margin-bottom:2px;color:var(--text-color);">1PC 중량</div>'
-                            f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{w_pc:,.1f} kg</div>'
-                            '</div>'
-                            '<div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);'
-                            'border-radius:8px;padding:7px 10px;text-align:center;">'
-                            '<div style="font-size:11px;opacity:0.6;margin-bottom:2px;color:var(--text-color);">총 중량</div>'
-                            f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{w_total:,.0f} kg</div>'
-                            f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">{w_total/1000:.2f} ton</div>'
-                            '</div>'
-                        )
-                    else:
-                        _weight_cells_dom = ""
-
-                    st.markdown(f"""
-<div style="border-radius:10px;padding:12px 16px;margin-bottom:10px;
-            background:var(--secondary-background-color);
-            border:1.5px solid rgba(128,128,128,0.15);">
-  <div style="font-size:13px;font-weight:700;color:var(--text-color);
-              margin-bottom:8px;line-height:1.5;word-break:break-word;">
-    🏷️ {r['code']} &nbsp;<span style="opacity:0.6;font-weight:400;">|</span>&nbsp;
-    {r['name']}
-  </div>
-  <div style="display:flex;gap:6px;flex-wrap:wrap;">
-    <div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);
-                border-radius:8px;padding:7px 10px;text-align:center;">
-      <div style="font-size:11px;opacity:0.6;margin-bottom:2px;color:var(--text-color);">수량</div>
-      <div style="font-size:14px;font-weight:700;color:var(--text-color);">{r['qty']} PC</div>
-    </div>
-    <div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);
-                border-radius:8px;padding:7px 10px;text-align:center;">
-      <div style="font-size:11px;opacity:0.6;margin-bottom:2px;color:var(--text-color);">PLT당 최대</div>
-      <div style="font-size:14px;font-weight:700;color:var(--text-color);">{r['max_pc']} PC</div>
-    </div>
-    <div style="flex:1;min-width:70px;background:rgba(59,130,246,0.1);
-                border-radius:8px;padding:7px 10px;text-align:center;">
-      <div style="font-size:11px;opacity:0.6;margin-bottom:2px;color:var(--text-color);">필요 파렛트</div>
-      <div style="font-size:14px;font-weight:700;color:var(--text-color);">{r['pallets']} PLT</div>
-    </div>
-    {_weight_cells_dom}
-  </div>
-  <div style="font-size:11px;opacity:0.5;margin-top:6px;color:var(--text-color);">
-    📐 파렛트 {plt_size} &nbsp;|&nbsp;
-    {r['qty']} ÷ {r['max_pc']} = {need_plt:.2f} → 올림 {r['pallets']} PLT
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-                # ── 혼적 합계 (복수 자재 시) ──────────────────────────────
-                total_plt_all = sum(r['pallets'] for r in resolved)
-                total_wkg_all = sum(r['weight_kg'] for r in resolved)
-                if len(resolved) > 1:
-                    st.markdown(f"""
-<div style="border-radius:10px;padding:12px 16px;margin-bottom:14px;
-            background:rgba(59,130,246,0.07);
-            border:1.5px solid rgba(59,130,246,0.25);">
-  <div style="font-size:13px;font-weight:700;color:var(--text-color);margin-bottom:6px;">
-    📦 혼적 합계
-  </div>
-  <div style="display:flex;gap:8px;flex-wrap:wrap;">
-    <div style="flex:1;min-width:80px;text-align:center;">
-      <div style="font-size:11px;opacity:0.6;color:var(--text-color);">총 파렛트</div>
-      <div style="font-size:16px;font-weight:700;color:var(--text-color);">{total_plt_all} PLT</div>
-    </div>
-    <div style="flex:1;min-width:80px;text-align:center;">
-      <div style="font-size:11px;opacity:0.6;color:var(--text-color);">총 중량</div>
-      <div style="font-size:16px;font-weight:700;color:var(--text-color);">{total_wkg_all:,.0f} kg</div>
-      <div style="font-size:11px;opacity:0.5;color:var(--text-color);">{total_wkg_all/1000:.2f} ton</div>
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-                # ── 배차 추천 (분할·혼적 통합) ────────────────────────────
-                st.markdown("#### 🚚 최적 배차 추천")
-                dispatch_items = [
-                    {"pallets": r["pallets"], "weight_kg": r["weight_kg"],
-                     "plt_w": r["plt_w"], "plt_l": r["plt_l"]}
-                    for r in resolved
-                ]
-                dispatch_result = get_split_dispatch_advice(dispatch_items)
-                _render_dispatch_result(dispatch_result)
-
-                # ── 버튼 행: 3D 입체 + 문의하기 ─────────────────────────
-                _btn3d_dom, _btnq_dom = st.columns([1, 1])
-                with _btn3d_dom:
-                    if st.button("🧊 3D 입체 보기", use_container_width=True, key="dom_3d_btn"):
-                        show_3d_view_popup(
-                            trucks=dispatch_result.get("trucks", []),
-                            resolved_items=resolved,
-                            mode="truck"
-                        )
-                with _btnq_dom:
-                    if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="dom_truck_query"):
-                        trucks = dispatch_result.get("trucks", [])
-                        truck_lines = "\n".join(
-                            f"  차량{i+1}: {t['name']} | {t.get('assigned_plt',0)}PLT | {t.get('assigned_weight_kg',0)/1000:.2f}ton"
-                            for i, t in enumerate(trucks)
-                        )
-                        item_lines = "\n".join(
-                            f"  {r['code']} ({r['name']}) {r['qty']}PC → {r['pallets']}PLT"
-                            for r in resolved
-                        )
-                        sim_summary = (
-                            f"[자재]\n{item_lines}\n"
-                            f"[합계] {total_plt_all}PLT / {total_wkg_all/1000:.2f}ton\n"
-                            f"[배차]\n{truck_lines}"
-                        )
-                        show_simulator_inquiry_popup("국내 최적 배차 시뮬레이터", sim_summary)
+            st.info("자재코드와 수량을 입력하시면 DB 기반으로 최적 차량을 분석합니다.")
 
 
     elif current_team == "트랙영업팀":
@@ -2264,8 +1634,10 @@ with st.sidebar:
                     )
                     if not crawler_sheet:
                         continue
+                    # 0행이 섹션 제목인지 확인해서 header 자동 결정
                     df_test = pd.read_excel(path, sheet_name=crawler_sheet, header=0, nrows=2)
                     first_col = str(df_test.columns[0])
+                    # 첫 컬럼이 '[크롤러...]' 같은 섹션 제목이면 header=1
                     if first_col.startswith("[") or "Unnamed" in first_col:
                         df = pd.read_excel(path, sheet_name=crawler_sheet, header=1).fillna("")
                     else:
@@ -2277,6 +1649,7 @@ with st.sidebar:
             if df is None:
                 return {}
 
+            # 컬럼명 자동 탐지 (이름이 바뀌어도 키워드로 찾기)
             cols = df.columns.tolist()
             def find_col(kw):
                 return next((c for c in cols if kw in str(c)), None)
@@ -2285,7 +1658,7 @@ with st.sidebar:
             name_col   = find_col("자재내역")
             qty_col    = find_col("최대 적재 수량") or find_col("적재 수량")
             size_col   = find_col("사이즈")
-            weight_col = find_col("중량") or find_col("KG") or find_col("kg")
+            weight_col = find_col("중량") or find_col("KG") or find_col("kg")  # ★ 중량 컬럼 탐지
 
             if not code_col:
                 return {}
@@ -2304,6 +1677,7 @@ with st.sidebar:
                     max_pc = int(float(str(row.get(qty_col, 1)).strip())) if qty_col else 1
                 except Exception:
                     max_pc = 1
+                # ★ 1PC당 중량(kg) 파싱
                 weight_per_pc = None
                 if weight_col:
                     try:
@@ -2317,338 +1691,103 @@ with st.sidebar:
                     "max_pc"       : max_pc,
                     "plt_w"        : w_mm / 1000,
                     "plt_l"        : l_mm / 1000,
-                    "weight_per_pc": weight_per_pc,
+                    "weight_per_pc": weight_per_pc,   # ★ kg/PC (없으면 None)
                 }
             return data
 
         CRAWLER_DATA = load_crawler_data()
 
-        # ── 자재 행 관리 세션 ───────────────────────────────────────────────
-        if "trk_sim_items" not in st.session_state:
-            st.session_state.trk_sim_items = [{"code": "", "qty": 1}]
-
-        def _add_trk_item():
-            st.session_state.trk_sim_items.append({"code": "", "qty": 1})
-
-        def _del_trk_item(i):
-            if len(st.session_state.trk_sim_items) > 1:
-                st.session_state.trk_sim_items.pop(i)
-
-        # ── 입력 UI ─────────────────────────────────────────────────────────
+        # ── 입력 폼 ────────────────────────────────────────────────────────
         with st.container(border=True):
-            st.markdown("##### 📦 자재 입력")
-            for i, row_item in enumerate(st.session_state.trk_sim_items):
-                col_code, col_qty, col_del = st.columns([3, 2, 0.7])
-                with col_code:
-                    new_code = st.text_input(
-                        f"자재코드 {i+1}", value=row_item["code"],
-                        placeholder="예: 6004216",
-                        key=f"trk_code_{i}"
-                    ).strip().split(".")[0].strip()
-                    st.session_state.trk_sim_items[i]["code"] = new_code
-                with col_qty:
-                    new_qty = st.number_input(
-                        f"수량{i+1} (PC)", min_value=1,
-                        value=row_item["qty"],
-                        key=f"trk_qty_{i}"
-                    )
-                    st.session_state.trk_sim_items[i]["qty"] = new_qty
-                with col_del:
-                    st.markdown("<div style='margin-top:26px;text-align:center;'>", unsafe_allow_html=True)
-                    if st.button("🗑️", key=f"trk_del_{i}", help="행 삭제",
-                                 disabled=len(st.session_state.trk_sim_items) == 1,
-                                 use_container_width=False):
-                        _del_trk_item(i)
-                        st.rerun()
-                    st.markdown("</div>", unsafe_allow_html=True)
+            t_item_code = st.text_input(
+                "🔖 자재코드", placeholder="예: 6004216"
+            ).strip().split(".")[0].strip()
+            t_qty = st.number_input("📦 수량 (PC)", min_value=1, value=1)
 
-            if st.button("➕ 자재 추가 (혼적)", use_container_width=True, key="trk_add_item"):
-                _add_trk_item()
-                st.rerun()
-
-        # ── 계산 실행 ────────────────────────────────────────────────────────
-        trk_active = [it for it in st.session_state.trk_sim_items if it["code"].strip()]
-
-        if not trk_active:
-            st.info("자재코드와 수량을 입력하시면 DB 기반으로 최적 차량을 분석합니다.")
-        else:
-            resolved_trk, errors_trk = [], []
-            for it in trk_active:
-                code = it["code"]
-                qty  = it["qty"]
-                db_item = CRAWLER_DATA.get(code)
-                if not db_item:
-                    partials = [c for c in CRAWLER_DATA if code in c]
-                    if partials:
-                        errors_trk.append(f"**{code}**: 정확한 코드 없음. 유사: {', '.join(partials[:3])}")
-                    else:
-                        errors_trk.append(f"**{code}**: DB에 없는 코드입니다.")
-                    continue
-                max_pc        = db_item['max_pc']
-                need_plt_ceil = -(-qty // max_pc)
-                weight_per_pc = db_item.get('weight_per_pc')
-                total_wkg     = (weight_per_pc * qty) if weight_per_pc else 0.0
-                resolved_trk.append({
-                    "code"    : code,
-                    "name"    : db_item['name'],
-                    "qty"     : qty,
-                    "max_pc"  : max_pc,
-                    "pallets" : need_plt_ceil,
-                    "weight_kg": total_wkg,
-                    "plt_w"   : db_item['plt_w'],
-                    "plt_l"   : db_item['plt_l'],
-                    "weight_per_pc": weight_per_pc,
-                })
-
-            for e in errors_trk:
-                st.warning(e)
-
-            if resolved_trk:
-                # ── 자재별 적재 계산 카드 ─────────────────────────────────
-                st.markdown("#### 📊 자재별 적재 계산")
-                for r in resolved_trk:
-                    need_plt = r['qty'] / r['max_pc']
-                    plt_size = f"{int(r['plt_w']*1000)} × {int(r['plt_l']*1000)} mm"
-                    w_pc     = r['weight_per_pc']
-                    w_total  = r['weight_kg']
-
-                    # 중량 셀은 사전 변수로 분리 (중첩 f-string 회피)
-                    if w_pc:
-                        _weight_cells_trk = (
-                            '<div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);'
-                            'border-radius:8px;padding:7px 10px;text-align:center;">'
-                            '<div style="font-size:11px;opacity:0.6;margin-bottom:2px;color:var(--text-color);">1PC 중량</div>'
-                            f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{w_pc:,.1f} kg</div>'
-                            '</div>'
-                            '<div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);'
-                            'border-radius:8px;padding:7px 10px;text-align:center;">'
-                            '<div style="font-size:11px;opacity:0.6;margin-bottom:2px;color:var(--text-color);">총 중량</div>'
-                            f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{w_total:,.0f} kg</div>'
-                            f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">{w_total/1000:.2f} ton</div>'
-                            '</div>'
-                        )
-                    else:
-                        _weight_cells_trk = ""
-
-                    st.markdown(f"""
-<div style="border-radius:10px;padding:12px 16px;margin-bottom:10px;
-            background:var(--secondary-background-color);
-            border:1.5px solid rgba(128,128,128,0.15);">
-  <div style="font-size:13px;font-weight:700;color:var(--text-color);
-              margin-bottom:8px;line-height:1.5;word-break:break-word;">
-    🏷️ {r['code']} &nbsp;<span style="opacity:0.6;font-weight:400;">|</span>&nbsp;
-    {r['name']}
-  </div>
-  <div style="display:flex;gap:6px;flex-wrap:wrap;">
-    <div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);
-                border-radius:8px;padding:7px 10px;text-align:center;">
-      <div style="font-size:11px;opacity:0.6;margin-bottom:2px;color:var(--text-color);">수량</div>
-      <div style="font-size:14px;font-weight:700;color:var(--text-color);">{r['qty']} PC</div>
-    </div>
-    <div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);
-                border-radius:8px;padding:7px 10px;text-align:center;">
-      <div style="font-size:11px;opacity:0.6;margin-bottom:2px;color:var(--text-color);">PLT당 최대</div>
-      <div style="font-size:14px;font-weight:700;color:var(--text-color);">{r['max_pc']} PC</div>
-    </div>
-    <div style="flex:1;min-width:70px;background:rgba(40,167,69,0.12);
-                border-radius:8px;padding:7px 10px;text-align:center;">
-      <div style="font-size:11px;opacity:0.6;margin-bottom:2px;color:var(--text-color);">필요 파렛트</div>
-      <div style="font-size:14px;font-weight:700;color:var(--text-color);">{r['pallets']} PLT</div>
-    </div>
-    {_weight_cells_trk}
-  </div>
-  <div style="font-size:11px;opacity:0.5;margin-top:6px;color:var(--text-color);">
-    📐 파렛트 {plt_size} &nbsp;|&nbsp;
-    {r['qty']} ÷ {r['max_pc']} = {need_plt:.2f} → 올림 {r['pallets']} PLT
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-                total_plt_trk = sum(r['pallets'] for r in resolved_trk)
-                total_wkg_trk = sum(r['weight_kg'] for r in resolved_trk)
-                if len(resolved_trk) > 1:
-                    st.markdown(f"""
-<div style="border-radius:10px;padding:12px 16px;margin-bottom:14px;
-            background:rgba(40,167,69,0.07);
-            border:1.5px solid rgba(40,167,69,0.25);">
-  <div style="font-size:13px;font-weight:700;color:var(--text-color);margin-bottom:6px;">
-    📦 혼적 합계
-  </div>
-  <div style="display:flex;gap:8px;flex-wrap:wrap;">
-    <div style="flex:1;min-width:80px;text-align:center;">
-      <div style="font-size:11px;opacity:0.6;color:var(--text-color);">총 파렛트</div>
-      <div style="font-size:16px;font-weight:700;color:var(--text-color);">{total_plt_trk} PLT</div>
-    </div>
-    <div style="flex:1;min-width:80px;text-align:center;">
-      <div style="font-size:11px;opacity:0.6;color:var(--text-color);">총 중량</div>
-      <div style="font-size:16px;font-weight:700;color:var(--text-color);">{total_wkg_trk:,.0f} kg</div>
-      <div style="font-size:11px;opacity:0.5;color:var(--text-color);">{total_wkg_trk/1000:.2f} ton</div>
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-                # ── 배차 추천 ────────────────────────────────────────────
-                st.markdown("#### 🚚 최적 배차 추천")
-                dispatch_items_trk = [
-                    {"pallets": r["pallets"], "weight_kg": r["weight_kg"],
-                     "plt_w": r["plt_w"], "plt_l": r["plt_l"]}
-                    for r in resolved_trk
-                ]
-
-                # _render_dispatch_result는 국내 시뮬레이터와 공유
-                dispatch_result_trk = get_split_dispatch_advice(dispatch_items_trk)
-
-                trucks_t           = dispatch_result_trk.get("trucks", [])
-                is_split_t         = dispatch_result_trk.get("split", False)
-                error_t            = dispatch_result_trk.get("error")
-
-                if error_t:
-                    st.warning(f"⚠️ {error_t}")
-                elif not trucks_t:
-                    st.warning("⚠️ 적합한 차량이 없습니다. 물류팀에 직접 문의하세요.")
+        # ── 계산 ───────────────────────────────────────────────────────────
+        if t_item_code:
+            item = CRAWLER_DATA.get(t_item_code)
+            if not item:
+                # 부분 일치 검색
+                partials = [c for c in CRAWLER_DATA if t_item_code in c]
+                if partials:
+                    st.warning(f"정확한 코드를 찾지 못했습니다. 유사 코드: {', '.join(partials[:5])}")
                 else:
-                    split_badge_t = (
-                        '<span class="dispatch-badge badge-split">🔀 분할 배차</span>'
-                        if is_split_t else
-                        '<span class="dispatch-badge badge-ok">✅ 단일 배차</span>'
-                    )
+                    st.error("❌ 등록되지 않은 자재코드입니다. DB를 확인해주세요.")
+            else:
+                st.markdown(f"**자재내역:** `{item['name']}`")
+
+                # 파렛트 수 계산
+                max_pc        = item['max_pc']
+                need_plt      = t_qty / max_pc
+                need_plt_ceil = -(-t_qty // max_pc)
+
+                # ★ 총 중량 계산
+                weight_per_pc  = item.get('weight_per_pc')
+                total_weight_kg = (weight_per_pc * t_qty) if weight_per_pc else 0.0
+
+                st.markdown("#### 📊 적재 계산")
+                st.markdown(f"""
+<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+  <div style="flex:1 1 90px;min-width:90px;background:var(--secondary-background-color);
+       border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:13px;color:var(--text-color);opacity:0.6;margin-bottom:4px;">수량</div>
+    <div style="font-size:20px;font-weight:700;color:var(--text-color);">{t_qty} PC</div>
+  </div>
+  <div style="flex:1 1 90px;min-width:90px;background:var(--secondary-background-color);
+       border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:13px;color:var(--text-color);opacity:0.6;margin-bottom:4px;">PLT당 최대</div>
+    <div style="font-size:20px;font-weight:700;color:var(--text-color);">{max_pc} PC</div>
+  </div>
+  <div style="flex:1 1 90px;min-width:90px;background:var(--secondary-background-color);
+       border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:13px;color:var(--text-color);opacity:0.6;margin-bottom:4px;">필요 파렛트</div>
+    <div style="font-size:20px;font-weight:700;color:var(--text-color);">{need_plt_ceil} PLT</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+                if weight_per_pc:
                     st.markdown(f"""
-<div class="dispatch-summary-box">
-  <strong>배차 요약</strong> &nbsp;{split_badge_t}<br>
-  <span style="opacity:0.7;">총 파렛트 {total_plt_trk} PLT &nbsp;|&nbsp;
-  총 중량 {total_wkg_trk:,.0f} kg ({total_wkg_trk/1000:.2f} ton) &nbsp;|&nbsp;
-  차량 {len(trucks_t)}대</span>
-</div>
-""", unsafe_allow_html=True)
-
-                    for idx, truck in enumerate(trucks_t, 1):
-                        if truck.get("is_lowbed"):
-                            st.markdown(f"""
-<div class="dispatch-card">
-  <div class="dispatch-card-header">🚛 차량 {idx} &nbsp;
-    <span class="dispatch-badge badge-warn">로베드 특수차량</span>
+<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+  <div style="flex:1 1 90px;min-width:90px;background:var(--secondary-background-color);
+       border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:13px;color:var(--text-color);opacity:0.6;margin-bottom:4px;">1PC당 중량</div>
+    <div style="font-size:20px;font-weight:700;color:var(--text-color);">{weight_per_pc:,.1f} kg</div>
   </div>
-  <p style="font-size:13px;color:var(--text-color);opacity:0.8;margin:0;">
-    제품 높이 2.6m 이상 전용 특수 차량입니다. 물류팀에 직접 문의하세요.
-  </p>
-</div>
-""", unsafe_allow_html=True)
-                            continue
-
-                        weight_ok_t = truck.get("weight_ok", True)
-                        rv_t   = truck.get("load_ratio_vol", 0)
-                        rw_t   = truck.get("load_ratio_wt",  0)
-                        a_plt_t = truck.get("assigned_plt", 0)
-                        a_wkg_t = truck.get("assigned_weight_kg", 0.0)
-                        max_wton_t = truck.get("max_weight_ton")
-
-                        s_badge_t = (
-                            '<span class="dispatch-badge badge-ok">중량 OK</span>'
-                            if weight_ok_t else
-                            '<span class="dispatch-badge badge-warn">⚠️ 중량 초과</span>'
-                        )
-                        vfc_t = "ratio-bar-fill-ok" if rv_t <= 90 else ("ratio-bar-fill-warn" if rv_t <= 100 else "ratio-bar-fill-over")
-                        wfc_t = "ratio-bar-fill-ok" if rw_t <= 90 else ("ratio-bar-fill-warn" if rw_t <= 100 else "ratio-bar-fill-over")
-                        max_wton_str_t = f"{max_wton_t} ton" if max_wton_t else "정보없음"
-
-                        wt_row_t = ""
-                        if max_wton_t:
-                            wt_row_t = f"""
-  <div class="dispatch-row">
-    <div class="dispatch-cell" style="flex:2;">
-      <div class="dispatch-cell-label">중량 적재율</div>
-      <div class="dispatch-cell-value">{rw_t:.1f}%</div>
-      <div class="ratio-bar-wrap"><div class="{wfc_t}" style="width:{min(rw_t,100)}%;"></div></div>
-      <div class="dispatch-cell-sub">{a_wkg_t/1000:.2f} ton / {max_wton_str_t}</div>
-    </div>
-    <div class="dispatch-cell" style="flex:2;">
-      <div class="dispatch-cell-label">부피 적재율</div>
-      <div class="dispatch-cell-value">{rv_t:.1f}%</div>
-      <div class="ratio-bar-wrap"><div class="{vfc_t}" style="width:{min(rv_t,100)}%;"></div></div>
-      <div class="dispatch-cell-sub">{a_plt_t} PLT / {truck['max_plt']} PLT</div>
-    </div>
-  </div>"""
-
-                        warn_t = ""
-                        if not weight_ok_t:
-                            warn_t = f"""
-  <div style="margin-top:8px;padding:8px 12px;background:rgba(234,179,8,0.12);
-              border-left:3px solid #f59e0b;border-radius:6px;
-              font-size:12px;color:var(--text-color);">
-    ⚠️ 적재 중량 {a_wkg_t/1000:.2f}ton이 허용 중량 {max_wton_str_t}을 초과합니다. 물류팀과 협의하세요.
-  </div>"""
-
-                        st.markdown(f"""
-<div class="dispatch-card">
-  <div class="dispatch-card-header">🚚 차량 {idx} &nbsp;{s_badge_t}</div>
-  <div class="dispatch-row">
-    <div class="dispatch-cell" style="flex:3;text-align:left;">
-      <div class="dispatch-cell-label">추천 차량</div>
-      <div class="dispatch-cell-value" style="font-size:15px;">{truck['name']}</div>
-      <div class="dispatch-cell-sub">{truck['spec']}</div>
-    </div>
-    <div class="dispatch-cell">
-      <div class="dispatch-cell-label">배정 PLT</div>
-      <div class="dispatch-cell-value">{a_plt_t}</div>
-      <div class="dispatch-cell-sub">/ {truck['max_plt']} 최대</div>
-    </div>
-    <div class="dispatch-cell">
-      <div class="dispatch-cell-label">배정 중량</div>
-      <div class="dispatch-cell-value">{a_wkg_t:,.0f} kg</div>
-      <div class="dispatch-cell-sub">({a_wkg_t/1000:.2f} ton)</div>
-    </div>
+  <div style="flex:1 1 90px;min-width:90px;background:var(--secondary-background-color);
+       border-radius:10px;padding:12px 14px;text-align:center;">
+    <div style="font-size:13px;color:var(--text-color);opacity:0.6;margin-bottom:4px;">총 중량</div>
+    <div style="font-size:20px;font-weight:700;color:var(--text-color);">{total_weight_kg:,.0f} kg</div>
+    <div style="font-size:13px;color:var(--text-color);opacity:0.55;margin-top:3px;">({total_weight_kg/1000:.2f} ton)</div>
   </div>
-  {wt_row_t}
-  {warn_t}
 </div>
 """, unsafe_allow_html=True)
 
-                    with st.expander("📐 산출 근거 보기"):
-                        for idx, truck in enumerate(trucks_t, 1):
-                            if truck.get("is_lowbed"):
-                                st.write(f"**차량 {idx}:** 로베드 특수차량")
-                                continue
-                            max_wton_t2 = truck.get("max_weight_ton")
-                            a_plt_t2    = truck.get("assigned_plt", 0)
-                            a_wkg_t2    = truck.get("assigned_weight_kg", 0.0)
-                            wok_t2      = truck.get("weight_ok", True)
-                            wt_chk = (
-                                f"✅ {a_wkg_t2/1000:.2f}ton ≤ {max_wton_t2}ton (중량 OK)"
-                                if wok_t2 else
-                                f"⚠️ {a_wkg_t2/1000:.2f}ton > {max_wton_t2}ton (중량 초과)"
-                            ) if max_wton_t2 else "중량 정보 없음"
-                            st.write(f"""**차량 {idx}: {truck['name']}**
-- 적재함: {truck['spec']}
-- 부피: {a_plt_t2}PLT / 최대 {truck['max_plt']}PLT → {truck.get('load_ratio_vol',0):.1f}%
-- 중량: {wt_chk}""")
+                st.caption(
+                    f"파렛트 사이즈: {int(item['plt_w']*1000)} × {int(item['plt_l']*1000)} mm  |  "
+                    f"계산: {t_qty} ÷ {max_pc} = {need_plt:.2f} → 올림 {need_plt_ceil} PLT"
+                )
 
-                # ── 버튼 행: 3D 입체 + 문의하기 ─────────────────────────
-                _btn3d_trk, _btnq_trk = st.columns([1, 1])
-                with _btn3d_trk:
-                    if st.button("🧊 3D 입체 보기", use_container_width=True, key="trk_3d_btn"):
-                        show_3d_view_popup(
-                            trucks=dispatch_result_trk.get("trucks", []),
-                            resolved_items=resolved_trk,
-                            mode="truck"
-                        )
-                with _btnq_trk:
-                    if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="trk_truck_query"):
-                        trucks_t2 = dispatch_result_trk.get("trucks", [])
-                        truck_lines_t = "\n".join(
-                            f"  차량{i+1}: {t['name']} | {t.get('assigned_plt',0)}PLT | {t.get('assigned_weight_kg',0)/1000:.2f}ton"
-                            for i, t in enumerate(trucks_t2)
-                        )
-                        item_lines_t = "\n".join(
-                            f"  {r['code']} ({r['name']}) {r['qty']}PC → {r['pallets']}PLT"
-                            for r in resolved_trk
-                        )
-                        sim_summary_t = (
-                            f"[자재]\n{item_lines_t}\n"
-                            f"[합계] {total_plt_trk}PLT / {total_wkg_trk/1000:.2f}ton\n"
-                            f"[배차]\n{truck_lines_t}"
-                        )
-                        show_simulator_inquiry_popup("크롤러 배차 시뮬레이터", sim_summary_t)
+                best_truck = get_db_transport_advice(
+                    need_plt_ceil, total_weight_kg,
+                    plt_w=item['plt_w'], plt_l=item['plt_l']
+                )
+                with st.expander("🚚 최적 배차 추천", expanded=True):
+                    render_truck_advice(best_truck, need_plt_ceil, total_weight_kg,
+                                        weight_per_pc, key_prefix="trk")
+
+                if st.button("📋 시뮬레이터 문의하기", use_container_width=True):
+                    truck_name = best_truck['name'] if best_truck else "없음"
+                    weight_line = f"\n총 중량: {total_weight_kg:,.0f}kg ({total_weight_kg/1000:.2f}ton)" if weight_per_pc else ""
+                    sim_summary = (
+                        f"자재코드: {t_item_code} ({item['name']})\n"
+                        f"수량: {t_qty}PC → {need_plt_ceil}PLT{weight_line}\n"
+                        f"추천 차량: {truck_name}"
+                    )
+                    show_simulator_inquiry_popup("크롤러 배차 시뮬레이터", sim_summary)
+        else:
+            st.info("자재코드와 수량을 입력하시면 DB 기반으로 최적 차량을 분석합니다.")
                        
 # ── 개선 요청 버튼 & 팝업 ────────────────────────────────────────────────
 if "show_improve_form" not in st.session_state:
@@ -2671,10 +1810,6 @@ if st.session_state.show_improve_form:
             "<p style='font-size:12px;color:#888;margin-top:0;'>기능 개선, 오류 신고, 아이디어 등 자유롭게 작성해주세요.</p>",
             unsafe_allow_html=True
         )
-        improve_author = st.text_input(
-            "✍️ 작성자", placeholder="이름을 입력하세요",
-            max_chars=30, key="improve_author_input"
-        )
         improve_text = st.text_area(
             label="내용 입력",
             placeholder="예) 특정 자재코드 검색 시 결과가 없습니다.\n예) 운임 계산에 ○○ 지역이 추가되면 좋겠습니다.",
@@ -2685,16 +1820,13 @@ if st.session_state.show_improve_form:
         _sub_col, _cancel_col = st.columns([1, 1])
         with _sub_col:
             if st.button("📨 제출하기", use_container_width=True, key="submit_improve"):
-                if not improve_author.strip():
-                    st.warning("작성자를 입력해주세요.")
-                elif not improve_text.strip():
+                if not improve_text.strip():
                     st.warning("내용을 입력해주세요.")
                 else:
                     current_team_for_mail = st.session_state.get("selected_team", "전체")
-                    full_content = f"[작성자: {improve_author.strip()}]\n\n{improve_text.strip()}"
                     try:
                         success = EMAIL_NOTIFIER.send_improvement_request(
-                            content=full_content,
+                            content=improve_text.strip(),
                             team=current_team_for_mail
                         )
                     except Exception:
@@ -2702,7 +1834,7 @@ if st.session_state.show_improve_form:
                     st.session_state.improve_submitted = True
                     st.session_state.show_improve_form = False
                     if success:
-                        st.toast(f"✅ 개선 요청이 담당자에게 전달되었습니다! ({improve_author.strip()})", icon="💡")
+                        st.toast("✅ 개선 요청이 담당자에게 전달되었습니다!", icon="💡")
                     else:
                         st.toast("⚠️ 전송에 실패했습니다. 직접 담당자에게 문의해주세요.", icon="⚠️")
                     st.rerun()

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Logibot Streamlit App",
+      "runtimeExecutable": "streamlit",
+      "runtimeArgs": ["run", "app.py", "--server.port", "8501"],
+      "port": 8501
+    },
+    {
+      "name": "Qdrant Vector DB",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["run", "-p", "6333:6333", "qdrant/qdrant"],
+      "port": 6333
+    }
+  ]
+}
