@@ -217,6 +217,119 @@ PRIORITY_COLS = ["자재코드", "자재내역", "자재 그룹",
                  "주름혹 컨베어벨트 자재코드", "주름혹 컨베어벨트 자재내역",
                  "크롤러 러버트랙 자재코드", "크롤러 러버트랙 자재내역"]
 
+# 주름혹벨트 시트 컬럼명 → 표준 키 매핑
+SIDEWALL_COL_MAP = {
+    "주름혹벨트 자재코드"   : "자재코드",
+    "주름혹벨트 자재내역"   : "자재내역",
+    "주름혹벨트 수량(M)"    : "수량(M)",
+    "주름혹벨트 순중량(KG)" : "순중량(KG)",
+    "우든 박스 포장재 규격 사이즈 제원\n(Width X Length X Height)": "우든박스 규격",
+    "주름혹벨트 우든박스 중량(KG)": "우든박스 중량(KG)",
+    "설명": "설명",
+}
+
+
+def sheet_to_sidewall_row_docs(df: pd.DataFrame, sheet_name: str, file_name: str) -> List[Document]:
+    """
+    주름혹벨트 우든박스 시트 전용 ROW 문서 생성.
+    - 컬럼명을 표준화하여 자재코드/순중량/수량을 정확히 추출
+    - 우든박스 중량(KG) 컬럼에 숫자가 없으므로
+      '포장 총 중량 = 수량(M) × 순중량(KG/M) + 우든박스중량'을
+      문서에 자연어로 직접 명시
+    - 동일 자재코드가 수량(M) 별로 여러 행인 경우 모두 개별 문서 생성
+    """
+    docs = []
+    seen = set()
+    cols = df.columns.tolist()
+
+    # 컬럼명 정규화 (앞뒤 공백 제거)
+    col_stripped = {c: c.strip() for c in cols}
+
+    # 역방향: 원본 컬럼명 → 표준키
+    def _find_col(keyword: str):
+        for c in cols:
+            if keyword in str(c):
+                return c
+        return None
+
+    code_col   = _find_col("자재코드")
+    name_col   = _find_col("자재내역")
+    qty_col    = _find_col("수량(M)")
+    wt_col     = _find_col("순중량")      # 순중량(KG)
+    box_col    = _find_col("우든박스 중량") or _find_col("우든박스 중량(KG)")
+    spec_col   = _find_col("규격 사이즈 제원") or _find_col("Width")
+    desc_col   = _find_col("설명")
+
+    for idx, row in df.iterrows():
+        code = clean_val(row.get(code_col, "")) if code_col else ""
+        name = clean_val(row.get(name_col, "")) if name_col else ""
+        # 자재코드 7자리 숫자만 허용
+        if code and not re.match(r'^\d{7}$', code.split(".")[0].strip()):
+            code = ""
+
+        qty_raw = row.get(qty_col, "") if qty_col else ""
+        wt_raw  = row.get(wt_col,  "") if wt_col  else ""
+        try:
+            qty = float(str(qty_raw).replace(",", "")) if clean_val(qty_raw) else None
+        except Exception:
+            qty = None
+        try:
+            wt = float(str(wt_raw).replace(",", "")) if clean_val(wt_raw) else None
+        except Exception:
+            wt = None
+
+        box_spec = clean_val(row.get(spec_col, "")) if spec_col else ""
+        desc     = clean_val(row.get(desc_col, "")) if desc_col else ""
+
+        # 벨트 순 중량 = 수량(M) × 순중량(KG/M)
+        belt_weight = None
+        if qty is not None and wt is not None:
+            belt_weight = round(qty * wt, 2)
+
+        # 우든박스 중량: 숫자 컬럼이 비어있으므로 박스 규격 기반 대략값 안내
+        box_weight_note = ""
+        if spec_col:
+            raw_box_wt = clean_val(row.get(box_col, "")) if box_col else ""
+            # 숫자가 있으면 사용, 없으면 규격 기반 안내
+            try:
+                box_wt_num = float(raw_box_wt)
+                box_weight_note = f"{box_wt_num}KG"
+            except Exception:
+                box_weight_note = "별도 확인 필요 (박스 규격 기준 대략 1000~4000KG)"
+
+        parts = []
+        if code: parts.append(f"자재코드: {code}")
+        if name: parts.append(f"자재내역: {name}")
+        if qty  is not None: parts.append(f"수량: {qty}M")
+        if wt   is not None: parts.append(f"순중량: {wt}KG/M")
+        if box_spec:         parts.append(f"우든박스 규격: {box_spec}")
+        if belt_weight is not None:
+            parts.append(f"벨트 순 중량: {belt_weight}KG (= {qty}M × {wt}KG/M)")
+            parts.append(f"포장 총 중량: {belt_weight}KG(벨트) + {box_weight_note}(우든박스)")
+        if desc: parts.append(f"설명: {desc}")
+
+        if not parts:
+            continue
+
+        content = f"[{sheet_name}]\n" + " | ".join(parts)
+        h = make_hash(content)
+        if h in seen or len(content.strip()) < 20:
+            continue
+        seen.add(h)
+
+        material_code = code or extract_material_code(content)
+        metadata = {
+            "source": file_name, "file_name": file_name,
+            "sheet_name": sheet_name, "row_number": int(idx) + 1,
+            "strategy": "ROW", "file_type": "excel",
+            "has_material_code": bool(material_code),
+        }
+        if material_code:
+            metadata["material_code"] = material_code
+
+        docs.append(Document(page_content=content, metadata=metadata))
+    return docs
+
 def sheet_to_row_docs(df: pd.DataFrame, sheet_name: str, file_name: str) -> List[Document]:
     docs = []
     seen = set()
@@ -276,7 +389,9 @@ def load_excel(file_path: str) -> List[Document]:
     # 시트별 헤더 행 오버라이드 (0-indexed)
     # 엑셀에서 실제 컬럼 헤더가 0행이 아닌 경우 명시
     HEADER_ROW_OVERRIDE = {
-        "물류팀 현황 데이터": 2,   # row 0: 빈 행, row 1: 섹션 타이틀, row 2: 실제 헤더
+        "물류팀 현황 데이터"             : 2,  # row 0: 빈 행, row 1: 섹션 타이틀, row 2: 실제 헤더
+        "주름혹벨트 우든박스 사이즈 데이터": 1,  # row 0: 섹션 타이틀([주름혹벨트 사이즈]), row 1: 실제 헤더
+        "크롤러 러버트랙 규격 데이터"      : 1,  # row 0: 섹션 타이틀([크롤러 러버트랙 자재 데이터]), row 1: 실제 헤더
     }
 
     try:
@@ -293,6 +408,9 @@ def load_excel(file_path: str) -> List[Document]:
             # 지입기사 노선 시트는 전용 함수 사용 (기사 누락 방지)
             if sheet_name == "지입 차량(기사) 노선 데이터":
                 docs = sheet_to_driver_route_doc(df, sheet_name, file_name)
+            # 주름혹벨트: 총중량 계산 + 컬럼명 정규화 전용 처리
+            elif sheet_name == "주름혹벨트 우든박스 사이즈 데이터":
+                docs = sheet_to_sidewall_row_docs(df, sheet_name, file_name)
             else:
                 fn = {"WHOLE": sheet_to_whole_doc, "QA": sheet_to_qa_docs,
                       "GROUP": sheet_to_group_docs, "ROW": sheet_to_row_docs}[strategy]

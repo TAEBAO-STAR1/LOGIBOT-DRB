@@ -18,7 +18,7 @@ if 'selected_team' not in st.session_state:
     
 selected_color = TEAM_CONFIG[st.session_state.selected_team]['color']
 
-# 2. 팀별 색상
+# 2. 팀별 색상 + 버튼 공통 CSS
 st.markdown(f"""
 <style>
     .team-container {{ display: flex; justify-content: center; gap: 15px; margin-bottom: 30px; }}
@@ -27,42 +27,142 @@ st.markdown(f"""
         color: white; font-weight: bold; cursor: pointer; transition: all 0.3s ease;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1); border: 2px solid transparent;
     }}
-    /* 부서별 고유 색상 및 호버 적용 */
     .btn-dom {{ background-color: {TEAM_CONFIG["국내영업팀"]["color"]}; }}
     .btn-dom:hover {{ background-color: {TEAM_CONFIG["국내영업팀"]["hover"]}; transform: translateY(-3px); box-shadow: 0 6px 12px rgba(0,0,0,0.2); }}
-    
     .btn-int {{ background-color: {TEAM_CONFIG["해외영업팀"]["color"]}; }}
     .btn-int:hover {{ background-color: {TEAM_CONFIG["해외영업팀"]["hover"]}; transform: translateY(-3px); }}
-    
     .btn-track {{ background-color: {TEAM_CONFIG["트랙영업팀"]["color"]}; }}
     .btn-track:hover {{ background-color: {TEAM_CONFIG["트랙영업팀"]["hover"]}; transform: translateY(-3px); }}
 
-    /* ── 행 삭제 휴지통 버튼: 프레임 완전 제거 ── */
-    button[title="행 삭제"] {{
-        background: transparent !important;
-        border: none !important;
-        box-shadow: none !important;
-        padding: 4px 6px !important;
-        font-size: 18px !important;
-        color: var(--text-color) !important;
-        opacity: 0.5;
-        transition: opacity 0.2s, transform 0.15s;
-        min-height: unset !important;
+    /* ── 섹션 헤더 커스텀 스타일 ── */
+    .section-header {{
+        font-size: 17px !important; font-weight: 700 !important;
+        color: var(--text-color) !important; margin: 4px 0 2px 0 !important;
+        padding: 0 !important; line-height: 1.4 !important;
     }}
-    button[title="행 삭제"]:hover {{
-        background: rgba(239,68,68,0.12) !important;
-        border: none !important;
-        box-shadow: none !important;
-        opacity: 1;
-        transform: scale(1.18);
-        border-radius: 6px !important;
+    .rainbow-divider {{
+        height: 3px; border: none; border-radius: 2px;
+        background: linear-gradient(90deg, #ff6b6b, #ffa500, #ffd700, #7ed957, #4fc3f7, #7c4dff);
+        margin: 4px 0 14px 0;
     }}
-    button[title="행 삭제"]:disabled {{
-        opacity: 0.15 !important;
-        cursor: not-allowed !important;
+    .sub-header {{
+        font-size: 14px !important; font-weight: 600 !important;
+        color: var(--text-color) !important; margin: 10px 0 6px 0 !important; opacity: 0.85;
     }}
 
+    /* ══════════════════════════════════════════════════════
+       사이드바 팀 선택 버튼: 컬럼 안 버튼만 타겟
+       ══════════════════════════════════════════════════════ */
+    [data-testid="stSidebar"] [data-testid="column"] button {{
+        font-size: 11px !important;
+        padding: 3px 1px !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        line-height: 1.2 !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="column"] button p {{
+        font-size: 11px !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        line-height: 1.2 !important;
+        margin: 0 !important;
+    }}
+
+    /* ── 사이드바 전체 버튼 폰트 통일 (새 대화 시작 / 대화목록) ── */
+    [data-testid="stSidebar"] button {{
+        font-size: 13px !important;
+    }}
+    [data-testid="stSidebar"] button p {{
+        font-size: 13px !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }}
+
+    /* ══════════════════════════════════════════════════════
+       휴지통 버튼: 🗑️ 단일 이모지를 가진 버튼 타겟
+       Streamlit은 버튼 텍스트를 <p> 태그로 렌더링하므로
+       p 텍스트 내용으로 식별 가능
+       ══════════════════════════════════════════════════════ */
+    button:has(p:only-child) {{
+        /* 전체 영향 방지 */
+    }}
+    /* 🗑️ 이모지만 있는 버튼 → 프레임 제거 */
+    [data-testid="stSidebar"] ~ div button:has(> div > p),
+    div[data-testid="stButton"]:has(button:has(p)) button[data-testid="baseButton-secondary"] {{
+        /* 기본 유지 */
+    }}
 </style>
+""", unsafe_allow_html=True)
+
+# ── 휴지통 버튼 전용 CSS + JS (별도 블록으로 분리)
+st.markdown("""
+<style>
+/* 휴지통 버튼에 동적으로 부여할 클래스 */
+.stDeleteBtn button {
+    background: transparent !important;
+    border: 1px solid rgba(239,68,68,0.35) !important;
+    box-shadow: none !important;
+    border-radius: 6px !important;
+    width: 100% !important;
+    min-height: 36px !important;
+    height: 36px !important;
+    opacity: 0.65 !important;
+    transition: opacity 0.18s ease, transform 0.15s ease !important;
+    color: var(--text-color) !important;
+    /* 이모지가 잘리지 않도록 */
+    overflow: visible !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 0 4px !important;
+}
+.stDeleteBtn button:hover {
+    background: rgba(239,68,68,0.10) !important;
+    border-color: rgba(239,68,68,0.7) !important;
+    opacity: 1 !important;
+    transform: scale(1.06) !important;
+}
+.stDeleteBtn button:disabled {
+    opacity: 0.2 !important;
+    transform: none !important;
+    border-color: rgba(128,128,128,0.2) !important;
+}
+/* 이모지 텍스트(<p>) 크기·위치 보정 */
+.stDeleteBtn button p,
+.stDeleteBtn button div {
+    font-size: 16px !important;
+    line-height: 1 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    /* variation-selector 등 숨겨진 문자 영향 방지 */
+    white-space: nowrap !important;
+}
+</style>
+<script>
+function markDeleteButtons() {
+    document.querySelectorAll('button').forEach(function(btn) {
+        var p = btn.querySelector('p');
+        if (!p) return;
+        // 이모지 코드포인트(U+1F5D1)를 JS 숫자로 직접 비교 — Python 문자열 파싱 영향 없음
+        var text = p.textContent || '';
+        var hasTrash = false;
+        for (var i = 0; i < text.length; i++) {
+            if (text.codePointAt(i) === 0x1F5D1) { hasTrash = true; break; }
+        }
+        if (!hasTrash) return;
+        var wrap = btn.closest('div[data-testid="stButton"]') || btn.parentElement;
+        if (wrap && !wrap.classList.contains('stDeleteBtn')) {
+            wrap.classList.add('stDeleteBtn');
+        }
+    });
+}
+markDeleteButtons();
+var _delObs = new MutationObserver(markDeleteButtons);
+_delObs.observe(document.body, { childList: true, subtree: true });
+</script>
 """, unsafe_allow_html=True)
 
 # --- 시뮬레이터 문의 팝업 ---
@@ -237,6 +337,95 @@ def show_source_popup(sources: list, query: str):
             )
             st.caption(f"🔍 하이라이트 키워드: {' · '.join(keywords) if keywords else '없음'}")
 
+# ── 3D 헬퍼 함수 (전역) ─────────────────────────────────────────────────────
+import plotly.graph_objects as _go3d
+
+def _place_pallets(plt_w, plt_l, car_w, car_l, n_plt):
+    """파렛트를 적재함에 배치한 (x,y) 좌표 목록 반환."""
+    positions = []
+    cols1 = int(car_w / plt_w) if plt_w <= car_w else 0
+    cols2 = int(car_w / plt_l) if plt_l <= car_w else 0
+    rows1 = int(car_l / plt_l) if cols1 else 0
+    rows2 = int(car_l / plt_w) if cols2 else 0
+    if cols1 * rows1 >= cols2 * rows2:
+        pw, pl = plt_w, plt_l
+        cols   = cols1
+    else:
+        pw, pl = plt_l, plt_w
+        cols   = cols2
+    if cols == 0:
+        return positions
+    placed = 0
+    row_idx = 0
+    while placed < n_plt:
+        y0 = row_idx * pl
+        if y0 + pl > car_l + 0.001:
+            break
+        for c in range(cols):
+            if placed >= n_plt:
+                break
+            positions.append((c * pw, y0))
+            placed += 1
+        row_idx += 1
+    return positions
+
+
+def _make_box_trace(x, y, z, dx, dy, dz, name, color, opacity=0.75):
+    """Mesh3d 박스 트레이스. '__hidden'으로 시작하면 범례 제외."""
+    import plotly.graph_objects as go
+    _hidden = name.startswith("__hidden")
+    return go.Mesh3d(
+        x=[x,x,x+dx,x+dx, x,x,x+dx,x+dx],
+        y=[y,y+dy,y+dy,y, y,y+dy,y+dy,y],
+        z=[z,z,z,z, z+dz,z+dz,z+dz,z+dz],
+        i=[7,0,0,0,4,4,6,6,4,0,3,2],
+        j=[3,4,1,2,5,6,5,2,0,1,6,3],
+        k=[0,7,2,3,6,7,1,1,5,5,7,6],
+        opacity=opacity,
+        color=color,
+        name="" if _hidden else name,
+        showlegend=not _hidden,
+        hovertemplate=(
+            "<extra></extra>" if _hidden else
+            f"<b>{name}</b><br>"
+            f"위치: ({x:.2f}, {y:.2f}, {z:.2f})<br>"
+            f"크기: {dx:.2f}m × {dy:.2f}m × {dz:.2f}m<extra></extra>"
+        )
+    )
+
+
+def _make_wireframe(lx, ly, lz, color="#888888"):
+    """적재함 외곽선(Wireframe) 12개 엣지 반환."""
+    import plotly.graph_objects as go
+    edges = [
+        ([0,lx],[0,0],[0,0]),   ([0,lx],[ly,ly],[0,0]),
+        ([0,0],[0,ly],[0,0]),   ([lx,lx],[0,ly],[0,0]),
+        ([0,lx],[0,0],[lz,lz]), ([0,lx],[ly,ly],[lz,lz]),
+        ([0,0],[0,ly],[lz,lz]), ([lx,lx],[0,ly],[lz,lz]),
+        ([0,0],[0,0],[0,lz]),   ([lx,lx],[0,0],[0,lz]),
+        ([0,0],[ly,ly],[0,lz]), ([lx,lx],[ly,ly],[0,lz]),
+    ]
+    return [
+        go.Scatter3d(x=xs, y=ys, z=zs, mode="lines",
+                     line=dict(color=color, width=2),
+                     showlegend=False, hoverinfo="skip")
+        for xs, ys, zs in edges
+    ]
+
+
+# ── 컨베어벨트 3D 팝업 ──────────────────────────────────────────────────────
+@st.dialog("🎡 컨베어벨트 3D 적재 시각화", width="large")
+def show_cb_3d_popup():
+    """session_state["cb_3d_data"]에서 fig, guide_html을 읽어 렌더링."""
+    data = st.session_state.get("cb_3d_data", {})
+    if not data:
+        st.warning("3D 데이터가 없습니다.")
+        return
+    st.markdown(data.get("guide_html", ""), unsafe_allow_html=True)
+    st.plotly_chart(data["fig"], use_container_width=True)
+    st.caption("💡 원통=컨베어벨트 롤 | 빨간점선=높이2.6m(로베드기준) | 마우스로 회전·확대")
+
+
 # ── 3D 적재 시각화 팝업 ──────────────────────────────────────────────────────
 @st.dialog("📦 3D 적재 시각화", width="large")
 def show_3d_view_popup(trucks: list, resolved_items: list, mode: str = "truck"):
@@ -262,90 +451,6 @@ def show_3d_view_popup(trucks: list, resolved_items: list, mode: str = "truck"):
         "45ft" : {"length":13.555, "width": 2.348, "height": 2.695},
     }
 
-    # ── 파렛트 배치 좌표 계산 ──────────────────────────────────────────────
-    def _place_pallets(plt_w, plt_l, car_w, car_l, n_plt):
-        """
-        파렛트(plt_w×plt_l)를 적재함(car_w×car_l)에 배치한 (x,y) 좌표 목록 반환.
-        가로 방향(Y) → 세로 방향(X) 순으로 채움.
-        """
-        positions = []
-        # 방향1: plt_w=폭, plt_l=길이
-        # 방향2: plt_l=폭, plt_w=길이 (90도 회전)
-        best_orient = (plt_w, plt_l)
-        # 더 많이 들어가는 방향 선택
-        cols1 = int(car_w / plt_w) if plt_w <= car_w else 0
-        cols2 = int(car_w / plt_l) if plt_l <= car_w else 0
-        rows1 = int(car_l / plt_l) if cols1 else 0
-        rows2 = int(car_l / plt_w) if cols2 else 0
-        if cols1 * rows1 >= cols2 * rows2:
-            pw, pl = plt_w, plt_l
-            cols   = cols1
-        else:
-            pw, pl = plt_l, plt_w
-            cols   = cols2
-
-        if cols == 0:
-            return positions
-
-        placed = 0
-        row_idx = 0
-        while placed < n_plt:
-            y0 = row_idx * pl
-            if y0 + pl > car_l + 0.001:
-                break
-            for c in range(cols):
-                if placed >= n_plt:
-                    break
-                x0 = c * pw
-                positions.append((x0, y0))
-                placed += 1
-            row_idx += 1
-        return positions
-
-    def _make_box_trace(x, y, z, dx, dy, dz, name, color, opacity=0.75):
-        """Mesh3d 박스 트레이스 생성"""
-        return go.Mesh3d(
-            x=[x,x,x+dx,x+dx, x,x,x+dx,x+dx],
-            y=[y,y+dy,y+dy,y, y,y+dy,y+dy,y],
-            z=[z,z,z,z, z+dz,z+dz,z+dz,z+dz],
-            i=[7,0,0,0,4,4,6,6,4,0,3,2],
-            j=[3,4,1,2,5,6,5,2,0,1,6,3],
-            k=[0,7,2,3,6,7,1,1,5,5,7,6],
-            opacity=opacity,
-            color=color,
-            name=name,
-            showlegend=True,
-            hovertemplate=(
-                f"<b>{name}</b><br>"
-                f"위치: ({x:.2f}, {y:.2f}, {z:.2f})<br>"
-                f"크기: {dx:.2f}m × {dy:.2f}m × {dz:.2f}m<extra></extra>"
-            )
-        )
-
-    def _make_wireframe(lx, ly, lz, color="#888888"):
-        """적재함 외곽선(Wireframe) 생성"""
-        edges = [
-            # 하단
-            ([0,lx],[0,0],[0,0]), ([0,lx],[ly,ly],[0,0]),
-            ([0,0],[0,ly],[0,0]), ([lx,lx],[0,ly],[0,0]),
-            # 상단
-            ([0,lx],[0,0],[lz,lz]), ([0,lx],[ly,ly],[lz,lz]),
-            ([0,0],[0,ly],[lz,lz]), ([lx,lx],[0,ly],[lz,lz]),
-            # 기둥
-            ([0,0],[0,0],[0,lz]), ([lx,lx],[0,0],[0,lz]),
-            ([0,0],[ly,ly],[0,lz]), ([lx,lx],[ly,ly],[0,lz]),
-        ]
-        traces = []
-        for xs, ys, zs in edges:
-            traces.append(go.Scatter3d(
-                x=xs, y=ys, z=zs,
-                mode="lines",
-                line=dict(color=color, width=2),
-                showlegend=False,
-                hoverinfo="skip"
-            ))
-        return traces
-
     # ── 팔레트 색상 팔레트 ────────────────────────────────────────────────
     PALETTE = [
         "#4C9BE8","#F4845F","#63C9A8","#E8C34C","#A878D8",
@@ -354,56 +459,181 @@ def show_3d_view_popup(trucks: list, resolved_items: list, mode: str = "truck"):
 
     # ── 컨테이너 모드 ─────────────────────────────────────────────────────
     if mode == "container":
-        # trucks 리스트에 컨테이너 타입("20ft"/"40ft") 정보 포함됨
         if not trucks:
             st.warning("컨테이너 정보가 없습니다.")
             return
 
-        cntr_type = trucks[0].get("container_type", "40ft")
-        dims      = CONTAINER_DIMS.get(cntr_type, CONTAINER_DIMS["40ft"])
-        cl, cw, ch = dims["length"], dims["width"], dims["height"]
+        cntr_type     = trucks[0].get("container_type", "40ft")
+        dims          = CONTAINER_DIMS.get(cntr_type, CONTAINER_DIMS["40ft"])
+        cl, cw, ch    = dims["length"], dims["width"], dims["height"]
+        assigned_plt  = trucks[0].get("assigned_plt", 0)
+        max_plt_cap   = trucks[0].get("max_plt_cap", assigned_plt)
+        boxes_per_plt = trucks[0].get("boxes_per_plt", 20)
+        box_layers    = trucks[0].get("box_layers", 1)
+        box_type      = trucks[0].get("box_type", "박스")
+        has_pkg       = trucks[0].get("has_pkg", False)
 
-        total_plt  = trucks[0].get("assigned_plt", 0)
-
-        # 파렛트 배치 (표준 해외 파렛트 1.1×1.1m 기준)
         plt_w = resolved_items[0].get("plt_w", 1.1) if resolved_items else 1.1
         plt_l = resolved_items[0].get("plt_l", 1.1) if resolved_items else 1.1
-        positions = _place_pallets(plt_w, plt_l, cw, cl, total_plt)
+        # plt_h_override: 패키징 단위 높이 반영 (없으면 기본 PALLET_HEIGHT)
+        _plt_total_h = trucks[0].get("plt_h_override", PALLET_HEIGHT)
+        single_layer_h = _plt_total_h / box_layers
+
+        all_positions    = _place_pallets(plt_w, plt_l, cw, cl, max_plt_cap)
+        loaded_positions = all_positions[:assigned_plt]
+        empty_positions  = all_positions[assigned_plt:]
 
         fig = go.Figure()
-        # 적재함 외곽
         for tr in _make_wireframe(cl, cw, ch):
             fig.add_trace(tr)
-        # 바닥면
         fig.add_trace(go.Mesh3d(
             x=[0,cl,cl,0], y=[0,0,cw,cw], z=[0,0,0,0],
             i=[0,0], j=[1,2], k=[2,3],
-            color="#CCCCCC", opacity=0.15, showlegend=False, hoverinfo="skip"
+            color="#AAAAAA", opacity=0.12, showlegend=False, hoverinfo="skip"
         ))
-        # 파렛트 배치
-        item_name = resolved_items[0].get("name","자재") if resolved_items else "자재"
-        for i, (px, py) in enumerate(positions):
+
+        # 적재된 파렛트 (단수 적용)
+        for i, (px, py) in enumerate(loaded_positions):
             color = PALETTE[i % len(PALETTE)]
+            for layer in range(box_layers):
+                z0  = layer * single_layer_h
+                lbl = f"PLT {i+1} {box_type}" + (f" {layer+1}단" if box_layers > 1 else "")
+                fig.add_trace(_make_box_trace(
+                    py, px, z0, plt_l, plt_w, single_layer_h,
+                    name=lbl if layer == 0 else f"__hidden_l{i}_{layer}",
+                    color=color, opacity=0.78
+                ))
+
+        # ── 2단 적재 구분선: 각 파렛트 위 1단/2단 경계에 수평선 표시 ──────
+        if has_pkg and box_layers > 1:
+            for i, (px, py) in enumerate(loaded_positions):
+                # 1단과 2단 사이 경계 평면 (흰색 얇은 사각형 테두리)
+                bz = single_layer_h   # 단 경계 z 높이
+                # 경계선 4개 엣지 (직사각형)
+                fig.add_trace(go.Scatter3d(
+                    x=[py, py+plt_l, py+plt_l, py,       py],
+                    y=[px, px,       px+plt_w,  px+plt_w, px],
+                    z=[bz, bz,       bz,         bz,       bz],
+                    mode="lines",
+                    line=dict(color="rgba(255,255,255,0.85)", width=3),
+                    name="__hidden_boundary",
+                    showlegend=False, hoverinfo="skip"
+                ))
+
+        # (2) 여유 공간 반투명 회색 표시
+        for j, (px, py) in enumerate(empty_positions):
             fig.add_trace(_make_box_trace(
                 py, px, 0, plt_l, plt_w, PALLET_HEIGHT,
-                name=f"PLT {i+1} ({item_name})", color=color
+                name="여유 공간" if j == 0 else "__hidden_empty",
+                color="#CCCCCC", opacity=0.18
             ))
 
-        loaded = len(positions)
+        rem_plt   = max_plt_cap - assigned_plt
+        ratio_pct = (assigned_plt / max_plt_cap * 100) if max_plt_cap else 0
+        stack_txt = (f"{box_layers}단 적재 (패키징)" if has_pkg and box_layers > 1
+                     else f"{box_layers}단 적재" if box_layers > 1 else "1단 적재")
+        # 2단 표시용 배지 HTML
+        pkg_badge = (
+            f'<span style="display:inline-block;margin-left:4px;padding:1px 7px;'
+            f'border-radius:10px;font-size:10px;font-weight:700;'
+            f'background:rgba(139,92,246,0.18);color:#7c3aed;">📦 {box_layers}단</span>'
+            if has_pkg and box_layers > 1 else ""
+        )
+
+        # ── CBM 계산 ────────────────────────────────────────────────────────
+        # 1) 컨테이너 총 용적 (m³)
+        cntr_total_cbm = cl * cw * ch
+
+        # 2) 파렛트 1개 부피: 가로 × 세로 × 높이(패키징 포함 전체 높이)
+        plt_cbm_each   = plt_w * plt_l * _plt_total_h
+
+        # 3) 적재 화물 총 CBM
+        cargo_cbm      = plt_cbm_each * assigned_plt
+
+        # 4) CBM 적재율 (화물 CBM / 컨테이너 총 CBM)
+        cbm_ratio      = (cargo_cbm / cntr_total_cbm * 100) if cntr_total_cbm else 0
+
+        # 5) 여유 CBM
+        rem_cbm        = cntr_total_cbm - cargo_cbm
+
         fig.update_layout(
             scene=dict(
                 xaxis=dict(range=[0, cl], title="길이 (m)"),
                 yaxis=dict(range=[0, cw], title="폭 (m)"),
                 zaxis=dict(range=[0, ch], title="높이 (m)"),
                 aspectmode="manual",
-                aspectratio=dict(x=cl/cw, y=1, z=ch/cw)
+                aspectratio=dict(x=cl/cw, y=1, z=ch/cw),
+                camera=dict(eye=dict(x=1.6, y=-1.8, z=1.3))
             ),
-            margin=dict(l=0,r=0,b=0,t=30),
-            legend=dict(font=dict(size=11))
+            margin=dict(l=0, r=0, b=0, t=30),
+            legend=dict(font=dict(size=11), x=0, y=1)
         )
-        st.markdown(f"**{cntr_type} 컨테이너** | 내부 {cl}×{cw}×{ch}m | "
-                    f"적재 {loaded}/{total_plt} PLT")
+
+        # ── 정보 카드 (1행: 컨테이너 / 적재PLT / 여유공간 / 적재방식) ──────
+        info_html = (
+            '<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">'
+            + '<div style="flex:1;min-width:100px;background:var(--secondary-background-color);'
+              'border-radius:8px;padding:8px 12px;border:1.5px solid rgba(128,128,128,0.15);">'
+              '<div style="font-size:11px;opacity:0.6;color:var(--text-color);">컨테이너</div>'
+              f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{cntr_type}</div>'
+              f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">{cl}×{cw}×{ch}m</div></div>'
+            + '<div style="flex:1;min-width:100px;background:rgba(59,130,246,0.08);'
+              'border-radius:8px;padding:8px 12px;border:1.5px solid rgba(59,130,246,0.2);">'
+              '<div style="font-size:11px;opacity:0.6;color:var(--text-color);">적재 PLT</div>'
+              f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{assigned_plt} / {max_plt_cap} PLT</div>'
+              f'<div style="font-size:11px;color:#3b82f6;">{ratio_pct:.0f}% 사용</div></div>'
+            + '<div style="flex:1;min-width:100px;background:rgba(128,128,128,0.06);'
+              'border-radius:8px;padding:8px 12px;border:1.5px solid rgba(128,128,128,0.15);">'
+              '<div style="font-size:11px;opacity:0.6;color:var(--text-color);">여유 공간</div>'
+              f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{rem_plt} PLT 여유</div>'
+              f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">≈ {int(rem_plt * boxes_per_plt)}박스 추가 가능</div></div>'
+            + '<div style="flex:1;min-width:100px;background:var(--secondary-background-color);'
+              'border-radius:8px;padding:8px 12px;border:1.5px solid rgba(128,128,128,0.15);">'
+              '<div style="font-size:11px;opacity:0.6;color:var(--text-color);">적재 방식</div>'
+              f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{stack_txt}{pkg_badge}</div>'
+              f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">PLT당 {boxes_per_plt}박스</div></div>'
+            + '</div>'
+        )
+
+        # ── CBM 카드 (2행) ───────────────────────────────────────────────────
+        cbm_color  = "#16a34a" if cbm_ratio <= 85 else ("#b45309" if cbm_ratio <= 100 else "#dc2626")
+        cbm_bg     = ("rgba(34,197,94,0.08)" if cbm_ratio <= 85
+                      else "rgba(234,179,8,0.08)" if cbm_ratio <= 100
+                      else "rgba(239,68,68,0.08)")
+        cbm_border = ("rgba(34,197,94,0.25)" if cbm_ratio <= 85
+                      else "rgba(234,179,8,0.25)" if cbm_ratio <= 100
+                      else "rgba(239,68,68,0.25)")
+
+        cbm_html = (
+            '<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;">'
+            # 화물 CBM
+            + f'<div style="flex:1;min-width:100px;background:{cbm_bg};'
+              f'border-radius:8px;padding:8px 12px;border:1.5px solid {cbm_border};">'
+              '<div style="font-size:11px;opacity:0.6;color:var(--text-color);">📦 화물 CBM</div>'
+              f'<div style="font-size:16px;font-weight:700;color:{cbm_color};">{cargo_cbm:.2f} m³</div>'
+              f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">PLT 1개 = {plt_cbm_each:.3f} m³</div></div>'
+            # 컨테이너 총 CBM
+            + '<div style="flex:1;min-width:100px;background:var(--secondary-background-color);'
+              'border-radius:8px;padding:8px 12px;border:1.5px solid rgba(128,128,128,0.15);">'
+              '<div style="font-size:11px;opacity:0.6;color:var(--text-color);">🚢 컨테이너 총 용적</div>'
+              f'<div style="font-size:16px;font-weight:700;color:var(--text-color);">{cntr_total_cbm:.2f} m³</div>'
+              f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">내부 {cl}×{cw}×{ch}m 기준</div></div>'
+            # CBM 적재율
+            + f'<div style="flex:1;min-width:100px;background:{cbm_bg};'
+              f'border-radius:8px;padding:8px 12px;border:1.5px solid {cbm_border};">'
+              '<div style="font-size:11px;opacity:0.6;color:var(--text-color);">📊 CBM 적재율</div>'
+              f'<div style="font-size:16px;font-weight:700;color:{cbm_color};">{cbm_ratio:.1f}%</div>'
+              f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">여유 {rem_cbm:.2f} m³ 남음</div></div>'
+            + '</div>'
+        )
+
+        st.markdown(info_html, unsafe_allow_html=True)
+        st.markdown(cbm_html, unsafe_allow_html=True)
         st.plotly_chart(fig, use_container_width=True)
+        _caption = "💡 회색 반투명 = 여유 공간 | 마우스로 회전·확대 | 범례 클릭으로 항목 숨기기"
+        if has_pkg and box_layers > 1:
+            _caption += f" | ─── 흰 경계선 = 1단·2단 구분 (패키징 {box_layers}단)"
+        st.caption(_caption)
         return
 
     # ── 차량 배차 모드 ────────────────────────────────────────────────────
@@ -490,6 +720,48 @@ def show_3d_view_popup(trucks: list, resolved_items: list, mode: str = "truck"):
                     orient_l = pl if (int(car_w / pw) >= 1) else pw
                     cur_x += max_y + orient_l
 
+            # ── 국내 도로 화물 가이드라인 표시 ──────────────────────────
+            # 국내 도로법 기준
+            # - 최대 높이: 4.0m (지상 기준, 적재함 기준 ~2.5m)
+            # - 최대 폭: 2.5m (적재함 기준 ~2.34m)
+            # - 높이 2.6m 이상: 로베드 차량 필요
+            GUIDE_H_LOWBED  = 2.6   # 로베드 기준 높이
+            GUIDE_H_LEGAL   = 4.0   # 도로법 최대 높이 (지상 기준, 표시용)
+            GUIDE_W_5TON    = 2.0   # 5톤 이상 폭 기준
+            GUIDE_W_MAX     = 2.5   # 도로법 최대 폭
+
+            # 가이드라인: 높이 2.6m 면 (로베드 기준) - 빨간 점선 평면
+            gl = car_l
+            # 높이 2.6m 수평선 (x방향 앞뒤)
+            if GUIDE_H_LOWBED <= car_h + 0.5:
+                fig.add_trace(go.Scatter3d(
+                    x=[0, gl, gl, 0, 0],
+                    y=[0, 0, car_w, car_w, 0],
+                    z=[GUIDE_H_LOWBED]*5,
+                    mode="lines",
+                    line=dict(color="#ef4444", width=3, dash="dash"),
+                    name="⚠️ 높이 2.6m (로베드 기준)",
+                    showlegend=True,
+                    hoverinfo="name"
+                ))
+
+            # 폭 2.0m 수직선 (5톤 이상 폭 기준)
+            if GUIDE_W_5TON <= car_w:
+                fig.add_trace(go.Scatter3d(
+                    x=[0, gl], y=[GUIDE_W_5TON, GUIDE_W_5TON], z=[0, 0],
+                    mode="lines",
+                    line=dict(color="#f59e0b", width=2, dash="dot"),
+                    name="폭 2.0m (5톤↑ 기준)",
+                    showlegend=True, hoverinfo="name"
+                ))
+                fig.add_trace(go.Scatter3d(
+                    x=[0, gl], y=[GUIDE_W_5TON, GUIDE_W_5TON], z=[car_h, car_h],
+                    mode="lines",
+                    line=dict(color="#f59e0b", width=2, dash="dot"),
+                    name="__hidden_w_top",
+                    showlegend=False, hoverinfo="skip"
+                ))
+
             # 레이아웃
             a_wkg = truck.get("assigned_weight_kg", 0)
             rv    = truck.get("load_ratio_vol", 0)
@@ -497,7 +769,7 @@ def show_3d_view_popup(trucks: list, resolved_items: list, mode: str = "truck"):
                 scene=dict(
                     xaxis=dict(range=[0, car_l], title="길이 (m)"),
                     yaxis=dict(range=[0, car_w], title="폭 (m)"),
-                    zaxis=dict(range=[0, car_h], title="높이 (m)"),
+                    zaxis=dict(range=[0, max(car_h, GUIDE_H_LOWBED + 0.1)], title="높이 (m)"),
                     aspectmode="manual",
                     aspectratio=dict(x=car_l/car_w, y=1, z=car_h/car_w),
                     camera=dict(eye=dict(x=1.5, y=-1.8, z=1.2))
@@ -506,13 +778,34 @@ def show_3d_view_popup(trucks: list, resolved_items: list, mode: str = "truck"):
                 legend=dict(font=dict(size=11), x=0, y=1)
             )
 
+            # 가이드라인 안내 카드
+            guide_html = (
+                '<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">'
+                + '<div style="flex:1;min-width:120px;background:rgba(239,68,68,0.08);border-radius:8px;'
+                  'padding:7px 12px;border:1.5px solid rgba(239,68,68,0.25);">'
+                  '<div style="font-size:11px;font-weight:700;color:#ef4444;">⚠️ 로베드 기준</div>'
+                  '<div style="font-size:12px;color:var(--text-color);">높이 <b>2.6m 이상</b> → 로베드 차량</div>'
+                  '<div style="font-size:11px;opacity:0.6;color:var(--text-color);">3D 내 빨간 점선</div></div>'
+                + '<div style="flex:1;min-width:120px;background:rgba(245,158,11,0.08);border-radius:8px;'
+                  'padding:7px 12px;border:1.5px solid rgba(245,158,11,0.25);">'
+                  '<div style="font-size:11px;font-weight:700;color:#f59e0b;">📏 폭 기준</div>'
+                  '<div style="font-size:12px;color:var(--text-color);"><b>2.0m↑</b> : 5톤~25톤/트레일러<br>'
+                  f'현재 적재함: <b>{car_w}m</b></div>'
+                  '<div style="font-size:11px;opacity:0.6;color:var(--text-color);">3D 내 주황 점선</div></div>'
+                + '<div style="flex:1;min-width:120px;background:rgba(59,130,246,0.08);border-radius:8px;'
+                  'padding:7px 12px;border:1.5px solid rgba(59,130,246,0.2);">'
+                  '<div style="font-size:11px;font-weight:700;color:#3b82f6;">🚛 도로법 기준</div>'
+                  '<div style="font-size:12px;color:var(--text-color);">최대 높이 <b>4.0m</b><br>최대 폭 <b>2.5m</b><br>최대 길이 <b>16.7m</b></div></div>'
+                + '</div>'
+            )
             st.markdown(
                 f"**{truck['name']}** | 적재함 {car_l}×{car_w}×{car_h}m | "
                 f"배정 {assigned_plt}PLT / {a_wkg:,.0f}kg | "
                 f"부피 적재율 **{rv:.1f}%**"
             )
+            st.markdown(guide_html, unsafe_allow_html=True)
             st.plotly_chart(fig, use_container_width=True)
-            st.caption("💡 마우스로 회전·확대·이동이 가능합니다. 범례를 클릭하면 특정 자재를 숨길 수 있습니다.")
+            st.caption("💡 빨간 점선=높이 2.6m(로베드 기준) | 주황 점선=폭 2.0m | 마우스로 회전·확대 가능")
 
 # --- RAG 인터페이스 연결(모듈화) ---
 # try:
@@ -1127,8 +1420,14 @@ with st.sidebar:
         )
 
     # 1. 부서 선택 탭 (최상단 고정)
-    st.markdown("### 🏢 부서 모드 선택")
+    st.markdown(
+        '<div style="font-size:17px;font-weight:700;color:var(--text-color);margin:4px 0 2px 0;line-height:1.4;">🏢 부서 모드 선택</div>'
+        '<hr style="height:3px;border:none;border-radius:2px;background:linear-gradient(90deg,#ff6b6b,#ffa500,#ffd700,#7ed957,#4fc3f7,#7c4dff);margin:3px 0 12px 0;">',
+        unsafe_allow_html=True
+    )
+
     team_options = {"국내영업팀": "🚚", "해외영업팀": "🚢", "트랙영업팀": "🚜"}
+    TEAM_SHORT   = {"국내영업팀": "국내", "해외영업팀": "해외", "트랙영업팀": "트랙"}
 
     generating = st.session_state.is_generating   # 짧은 alias
     team_cols = st.columns(3)
@@ -1136,7 +1435,7 @@ with st.sidebar:
         is_selected = (st.session_state.selected_team == t_name)
         # 생성 중이면 버튼 비활성화
         btn_clicked = team_cols[idx].button(
-            f"{t_icon}\n{t_name[:2]}",
+            f"{t_icon} {TEAM_SHORT[t_name]}",
             key=f"sidebar_team_{t_name}",
             use_container_width=True,
             type="primary" if is_selected else "secondary",
@@ -1157,9 +1456,12 @@ with st.sidebar:
             st.rerun()
 
     st.markdown(f"**현재 모드:** `{st.session_state.selected_team}`")
-    st.markdown("---")
 
-    st.title("💬 대화 목록")
+    st.markdown(
+        '<div style="font-size:17px;font-weight:700;color:var(--text-color);margin:4px 0 2px 0;line-height:1.4;">💬 대화 목록</div>'
+        '<hr style="height:3px;border:none;border-radius:2px;background:linear-gradient(90deg,#ff6b6b,#ffa500,#ffd700,#7ed957,#4fc3f7,#7c4dff);margin:3px 0 12px 0;">',
+        unsafe_allow_html=True
+    )
     
     if st.button("새 대화 시작", use_container_width=True, disabled=generating):
         cur_team = st.session_state.selected_team
@@ -1298,13 +1600,69 @@ with st.sidebar:
         return packing_table, group_list, packing_list
 
     PACKING_TABLE, GROUP_LIST, PACKING_LIST = load_packing_db()
-    # PLT당 박스 수 기본값 (추후 DB 시트 추가 시 확장 가능)
+
+    # ── 포장재별 규격 정의 (요구사항 기반) ───────────────────────────────────
+    # boxes_per_plt : PLT당 박스 수
+    # plt_w/l/h     : 파렛트 단위 치수 (m) - 1단 기준
+    # pkg_w/l/h     : 패키징 단위 치수 (m) - 2단 적재 기준 (없으면 1단과 동일)
+    # has_pkg       : 패키징(2단) 단위 표현 여부
+    # layers        : 3D 시각화 적재 단수
+    PACKING_SPEC = {
+        "제품-600박스": {
+            "boxes_per_plt": 8,
+            "plt_w": 1.2, "plt_l": 0.8, "plt_h": 0.73,
+            "pkg_w": 1.2, "pkg_l": 0.8, "pkg_h": 1.46,
+            "has_pkg": True, "layers": 2,
+        },
+        "제품-650박스": {
+            "boxes_per_plt": 20,
+            "plt_w": 1.1, "plt_l": 1.1, "plt_h": 2.20,
+            "pkg_w": 1.1, "pkg_l": 1.1, "pkg_h": 2.20,
+            "has_pkg": False, "layers": 1,
+        },
+        "제품-1090박스": {
+            "boxes_per_plt": 4,
+            "plt_w": 1.1, "plt_l": 1.1, "plt_h": 1.11,
+            "pkg_w": 1.1, "pkg_l": 1.1, "pkg_h": 2.22,
+            "has_pkg": True, "layers": 2,
+        },
+        "제품-세미박스": {
+            "boxes_per_plt": 1,
+            "plt_w": 1.1, "plt_l": 1.15, "plt_h": 1.10,
+            "pkg_w": 1.1, "pkg_l": 1.15, "pkg_h": 1.10,
+            "has_pkg": False, "layers": 1,
+        },
+        "제품-마대": {
+            "boxes_per_plt": 20,
+            "plt_w": 1.1, "plt_l": 1.1, "plt_h": 1.20,
+            "pkg_w": 1.1, "pkg_l": 1.1, "pkg_h": 1.20,
+            "has_pkg": False, "layers": 1,
+        },
+    }
+    # 슬리브는 제품과 동일 규격 기본 적용
+    for k in ["슬리브-650박스","슬리브-세미박스","슬리브-600박스"]:
+        base = k.replace("슬리브-", "제품-")
+        if base in PACKING_SPEC:
+            PACKING_SPEC[k] = PACKING_SPEC[base].copy()
+
+    def _get_packing_spec(packing_name: str) -> dict:
+        return PACKING_SPEC.get(packing_name, {
+            "boxes_per_plt": 20, "plt_w": 1.1, "plt_l": 1.1, "plt_h": 2.20,
+            "pkg_w": 1.1, "pkg_l": 1.1, "pkg_h": 2.20,
+            "has_pkg": False, "layers": 1,
+        })
+
+    # PLT당 박스 수 (포장재 선택 전 기본값 — 실제 계산에서는 PACKING_SPEC 우선)
     GROUP_PALLET_LIMIT = {"B01": 20, "B02": 20, "N18": 20, "N19": 20}
 
     current_team = st.session_state.selected_team
 
     if current_team == "해외영업팀":
-        st.subheader("📦 수출 포장량 시뮬레이터", divider="rainbow")
+        st.markdown(
+            '<div style="font-size:17px;font-weight:700;color:var(--text-color);margin:4px 0 2px 0;line-height:1.4;">📦 수출 포장량 시뮬레이터</div>'
+            '<hr style="height:3px;border:none;border-radius:2px;background:linear-gradient(90deg,#ff6b6b,#ffa500,#ffd700,#7ed957,#4fc3f7,#7c4dff);margin:3px 0 12px 0;">',
+            unsafe_allow_html=True
+        )
 
         with st.container(border=True):
             total_target_weight = st.number_input(
@@ -1348,7 +1706,17 @@ with st.sidebar:
                         else:
                             # 마지막 그룹은 나머지 자동 계산
                             last_val = max(0.0, round(remaining, 1))
-                            st.metric(f"{grp} (kg)", f"{last_val:,.1f}")
+                            st.markdown(
+                                f'<div style="margin-top:4px;">'
+                                f'<label style="font-size:12px;color:var(--text-color);'
+                                f'opacity:0.7;">{grp} (kg)</label>'
+                                f'<div style="background:var(--secondary-background-color);'
+                                f'border:1px solid rgba(128,128,128,0.25);border-radius:6px;'
+                                f'padding:8px 10px;font-size:14px;font-weight:600;'
+                                f'color:var(--text-color);margin-top:4px;word-break:break-all;">'
+                                f'{last_val:,.1f}</div></div>',
+                                unsafe_allow_html=True
+                            )
                             group_weights[grp] = last_val
 
                 # 합계 검증
@@ -1365,82 +1733,145 @@ with st.sidebar:
         # ── 계산 시작 ────────────────────────────────────────────────────
         if selected_groups and selected_packing != "선택하세요":
 
-            st.markdown("#### 📊 시뮬레이션 결과")
+            st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">📊 시뮬레이션 결과</div>', unsafe_allow_html=True)
 
             # 슬리브 안내
             if "슬리브" in selected_packing:
                 st.info("ℹ️ 슬리브 항목은 현재 파렛트 포장으로 변경 중인 항목입니다.")
 
-            # ── 그룹별 개별 결과 테이블 ─────────────────────────────────
+            # ── 포장재 규격 로드 ─────────────────────────────────────────
             import math as _math
+            _pspec       = _get_packing_spec(selected_packing)
+            _boxes_pp    = _pspec["boxes_per_plt"]   # PLT당 박스 수
+            _has_pkg     = _pspec["has_pkg"]          # 패키징(2단) 표현 여부
+            _layers      = _pspec["layers"]
+            _plt_w       = _pspec["plt_w"]
+            _plt_l       = _pspec["plt_l"]
+            _plt_h       = _pspec["plt_h"]
+            _pkg_h       = _pspec["pkg_h"]
+            _pkg_unit_txt = (
+                f"{int(_pspec['pkg_w']*1000)}×{int(_pspec['pkg_l']*1000)}×{int(_pkg_h*1000)}mm"
+                if _has_pkg else ""
+            )
+            _plt_unit_txt = f"{int(_plt_w*1000)}×{int(_plt_l*1000)}×{int(_plt_h*1000)}mm"
+
+            # ── 그룹별 개별 결과 테이블 ─────────────────────────────────
             if len(selected_groups) > 1:
                 st.markdown("**그룹별 계산**")
                 rows = []
                 total_boxes   = 0.0
                 total_pallets = 0.0
                 for grp in selected_groups:
-                    gw        = group_weights.get(grp, 0.0)
-                    box_limit = GROUP_PALLET_LIMIT.get(grp, 20)
-                    # ★ 자재그룹별 실제 단위 중량 DB에서 조회
+                    gw     = group_weights.get(grp, 0.0)
                     unit_w = (PACKING_TABLE.get(selected_packing, {}).get(grp)
-                              or PACKING_TABLE.get(selected_packing, {}).get(list(PACKING_TABLE.get(selected_packing, {}).keys())[0] if PACKING_TABLE.get(selected_packing) else None))
+                              or PACKING_TABLE.get(selected_packing, {}).get(
+                                  list(PACKING_TABLE.get(selected_packing, {}).keys())[0]
+                                  if PACKING_TABLE.get(selected_packing) else None))
                     if not unit_w:
                         st.warning(f"⚠️ {grp} × {selected_packing} 조합의 중량 데이터가 없습니다.")
                         continue
-                    g_boxes   = _math.ceil(gw / unit_w) if unit_w else 0
-                    g_pallets = _math.ceil(g_boxes / box_limit) if box_limit else 0
+                    g_boxes   = _math.ceil(gw / unit_w)
+                    g_pallets = _math.ceil(g_boxes / _boxes_pp)
                     total_boxes   += g_boxes
                     total_pallets += g_pallets
                     rows.append({
-                        "자재그룹": grp,
+                        "그룹": grp,
                         "중량(kg)": f"{gw:,.1f}",
-                        "박스당(kg)": f"{unit_w}",
+                        "박스당kg": f"{unit_w}",
                         "박스(PKG)": f"{g_boxes}",
                         "PLT": f"{g_pallets}",
-                        "PLT당 박스": str(box_limit)
+                        "PLT당": f"{_boxes_pp}",
                     })
                 rows.append({
-                    "자재그룹": "✅ 합계",
+                    "그룹": "합계",
                     "중량(kg)": f"{sum(group_weights.values()):,.1f}",
-                    "박스당(kg)": "",
+                    "박스당kg": "",
                     "박스(PKG)": f"{int(total_boxes)}",
                     "PLT": f"{int(total_pallets)}",
-                    "PLT당 박스": ""
+                    "PLT당": "",
                 })
-                import pandas as _pd
-                st.dataframe(
-                    _pd.DataFrame(rows),
-                    use_container_width=True,
-                    hide_index=True
+                # HTML 테이블 렌더링
+                _cols = list(rows[0].keys())
+                _widths = {"그룹":"9%","중량(kg)":"18%","박스당kg":"12%","박스(PKG)":"14%","PLT":"9%","PLT당":"9%"}
+                _thead = "".join(
+                    '<th style="background:rgba(59,130,246,0.15);padding:6px 8px;'
+                    'font-size:11px;font-weight:700;color:var(--text-color);'
+                    f'white-space:nowrap;width:{_widths.get(h,"auto")};">{h}</th>'
+                    for h in _cols
+                )
+                _tbody = ""
+                for ri, row in enumerate(rows):
+                    _is_tot = row["그룹"] == "합계"
+                    _bg = "rgba(59,130,246,0.07)" if _is_tot else ("rgba(128,128,128,0.04)" if ri%2==0 else "transparent")
+                    _fw = "700" if _is_tot else "400"
+                    _tbody += f"<tr style='background:{_bg};'>"
+                    for h in _cols:
+                        v = row.get(h, "")
+                        _tbody += (
+                            f'<td style="padding:6px 8px;font-size:12px;color:var(--text-color);'
+                            f'font-weight:{_fw};white-space:nowrap;" title="{v}">{v}</td>'
+                        )
+                    _tbody += "</tr>"
+                st.markdown(
+                    '<div style="overflow-x:auto;border-radius:8px;'
+                    'border:1px solid rgba(128,128,128,0.2);margin:4px 0 8px;">'
+                    '<table style="width:100%;border-collapse:collapse;">'
+                    f'<thead><tr>{_thead}</tr></thead>'
+                    f'<tbody>{_tbody}</tbody>'
+                    '</table></div>',
+                    unsafe_allow_html=True
                 )
                 calc_boxes   = total_boxes
                 calc_pallets = total_pallets
 
             else:
                 # 단일 그룹
-                grp       = selected_groups[0]
-                box_limit = GROUP_PALLET_LIMIT.get(grp, 20)
-                # ★ 자재그룹별 실제 단위 중량 DB에서 조회
+                grp    = selected_groups[0]
                 unit_w = PACKING_TABLE.get(selected_packing, {}).get(grp)
                 if not unit_w:
                     st.warning(f"⚠️ {grp} × {selected_packing} 조합의 중량 데이터가 없습니다.")
                     unit_w = 1
                 calc_boxes   = _math.ceil(total_target_weight / unit_w)
-                calc_pallets = _math.ceil(calc_boxes / box_limit)
+                calc_pallets = _math.ceil(calc_boxes / _boxes_pp)
 
-                res_col1, res_col2 = st.columns(2)
-                with res_col1:
+                _c1, _c2 = st.columns(2)
+                with _c1:
                     st.metric("필요 박스", f"{calc_boxes} PKG")
-                with res_col2:
+                with _c2:
                     st.metric("필요 PLT", f"{calc_pallets} PLT")
-                st.caption(f"ℹ️ 적용 기준: {grp} × {selected_packing} = {unit_w}kg/박스 / PLT당 {box_limit}박스")
+                st.caption(
+                    f"ℹ️ {grp} × {selected_packing} = {unit_w}kg/박스 / PLT당 {_boxes_pp}박스"
+                )
+
+            # ── 파렛트 규격 안내 ─────────────────────────────────────────
+            _spec_lines = [f"📦 파렛트 단위: {_plt_unit_txt} / PLT당 {_boxes_pp}박스"]
+            if _has_pkg:
+                _spec_lines.append(f"📦 패키징 단위: {_pkg_unit_txt} ({_layers}단 적재)")
+            st.caption(" · ".join(_spec_lines))
 
             # ── 합산 요약 (복수 그룹일 때만) ─────────────────────────────
             if len(selected_groups) > 1:
-                col1, col2, col3 = st.columns(3)
-                col1.metric("총 박스", f"{int(calc_boxes)} PKG")
-                col2.metric("총 PLT",  f"{int(calc_pallets)} PLT")
-                col3.metric("포장재", selected_packing)
+                st.markdown(f"""
+<div style="display:flex;gap:8px;margin:10px 0 4px;">
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:10px;
+              padding:10px 14px;border:1.5px solid rgba(128,128,128,0.15);">
+    <div style="font-size:11px;opacity:0.6;color:var(--text-color);margin-bottom:4px;">총 박스</div>
+    <div style="font-size:18px;font-weight:700;color:var(--text-color);">{int(calc_boxes)} PKG</div>
+  </div>
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:10px;
+              padding:10px 14px;border:1.5px solid rgba(128,128,128,0.15);">
+    <div style="font-size:11px;opacity:0.6;color:var(--text-color);margin-bottom:4px;">총 PLT</div>
+    <div style="font-size:18px;font-weight:700;color:var(--text-color);">{int(calc_pallets)} PLT</div>
+  </div>
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:10px;
+              padding:10px 14px;border:1.5px solid rgba(128,128,128,0.15);overflow:hidden;">
+    <div style="font-size:11px;opacity:0.6;color:var(--text-color);margin-bottom:4px;">포장재</div>
+    <div style="font-size:13px;font-weight:700;color:var(--text-color);
+                white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+         title="{selected_packing}">{selected_packing}</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
             # ── 배차 및 컨테이너 분석 ─────────────────────────────────────
             best_truck = get_db_transport_advice(calc_pallets)
@@ -1485,44 +1916,116 @@ with st.sidebar:
                     st.warning("⚠️ 대량 물량으로 인한 별도 배차 협의가 필요합니다.")
 
             # ── 챗봇 연동 버튼 ────────────────────────────────────────────
-            _btn3d_cntr, _btnq_cntr = st.columns([1, 1])
-            with _btn3d_cntr:
-                if st.button("🧊 3D 입체 보기", use_container_width=True, key="cntr_3d_btn"):
-                    # 컨테이너 타입 결정
-                    _cntr_type = "20ft" if int(calc_pallets) <= 10 else "40ft"
-                    _cntr_plt  = 10 if _cntr_type == "20ft" else 20
-                    _used_plt  = int(calc_pallets) % _cntr_plt or _cntr_plt
-                    _cntr_trucks = [{
-                        "name"          : f"{_cntr_type} 컨테이너",
-                        "spec"          : f"컨테이너 {_cntr_type}",
-                        "assigned_plt"  : _used_plt,
-                        "container_type": _cntr_type,
-                        "is_lowbed"     : False,
-                    }]
-                    # resolved_items에서 파렛트 정보 추출 (없으면 기본값)
-                    _cntr_items = []
-                    grp = selected_groups[0] if selected_groups else "B01"
-                    _cntr_items = [{"name": grp, "code": grp, "plt_w": 1.1, "plt_l": 1.1, "pallets": _used_plt}]
-                    show_3d_view_popup(
-                        trucks=_cntr_trucks,
-                        resolved_items=_cntr_items,
-                        mode="container"
-                    )
-            with _btnq_cntr:
+            _3d_spec   = _get_packing_spec(selected_packing)
+            _cntr_type = "20ft" if int(calc_pallets) <= 10 else "40ft"
+            _max_cap   = 10 if _cntr_type == "20ft" else 20
+            _box_type  = selected_packing.replace("제품-","").replace("슬리브-","")
+            _3d_plt_h  = _3d_spec["pkg_h"] if _3d_spec["has_pkg"] else _3d_spec["plt_h"]
+            _3d_layers = _3d_spec["layers"]
+            _grp       = selected_groups[0] if selected_groups else "B01"
+
+            # 컨테이너 대수별 PLT 배분 계산
+            _total_plt_int = int(calc_pallets)
+            _cntr_list = []   # [(컨테이너번호, 적재PLT)]
+            _remaining = _total_plt_int
+            _cntr_idx  = 1
+            while _remaining > 0:
+                _this_plt = min(_remaining, _max_cap)
+                _cntr_list.append((_cntr_idx, _this_plt))
+                _remaining -= _this_plt
+                _cntr_idx  += 1
+
+            # 3D 버튼: 컨테이너 1대면 기존 방식, 2대 이상이면 각각 버튼
+            if len(_cntr_list) == 1:
+                _btn3d_cntr, _btnq_cntr = st.columns([1, 1])
+                with _btn3d_cntr:
+                    if st.button("🧊 3D 입체 보기", use_container_width=True, key="cntr_3d_btn"):
+                        _used_plt = _cntr_list[0][1]
+                        show_3d_view_popup(
+                            trucks=[{
+                                "name": f"{_cntr_type} 컨테이너",
+                                "spec": f"컨테이너 {_cntr_type}",
+                                "assigned_plt"  : _used_plt,
+                                "max_plt_cap"   : _max_cap,
+                                "boxes_per_plt" : _3d_spec["boxes_per_plt"],
+                                "box_layers"    : _3d_layers,
+                                "box_type"      : _box_type,
+                                "container_type": _cntr_type,
+                                "plt_h_override": _3d_plt_h,
+                                "has_pkg"       : _3d_spec["has_pkg"],
+                                "is_lowbed"     : False,
+                            }],
+                            resolved_items=[{
+                                "name": _grp, "code": _grp,
+                                "plt_w": _3d_spec["plt_w"], "plt_l": _3d_spec["plt_l"],
+                                "pallets": _used_plt,
+                            }],
+                            mode="container"
+                        )
+                with _btnq_cntr:
+                    if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="cntr_query_btn"):
+                        grp_summary = ", ".join(f"{g}({group_weights.get(g,0):,.0f}kg)" for g in selected_groups)
+                        sim_summary = (
+                            f"포장재: {selected_packing}\n"
+                            f"자재그룹: {grp_summary}\n"
+                            f"목표 중량: {total_target_weight:,.0f}kg\n"
+                            f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT"
+                        )
+                        show_simulator_inquiry_popup("수출 포장량 시뮬레이터", sim_summary)
+            else:
+                # 컨테이너 2대 이상: 각 컨테이너별 3D 버튼 행
+                st.markdown(
+                    f'<div style="font-size:12px;font-weight:600;color:var(--text-color);'
+                    f'opacity:0.7;margin:6px 0 4px;">🚢 컨테이너 {len(_cntr_list)}대 — 각각 3D로 확인하세요</div>',
+                    unsafe_allow_html=True
+                )
+                _3d_cols = st.columns(len(_cntr_list))
+                for _ci, (_cno, _cplt) in enumerate(_cntr_list):
+                    with _3d_cols[_ci]:
+                        _is_full = (_cplt == _max_cap)
+                        _label = f"🧊 {_cno}번 컨테이너\n({'풀' if _is_full else f'{_cplt}/{_max_cap} PLT'})"
+                        if st.button(_label, use_container_width=True, key=f"cntr_3d_btn_{_cno}"):
+                            show_3d_view_popup(
+                                trucks=[{
+                                    "name"          : f"{_cntr_type} {_cno}번 컨테이너",
+                                    "spec"          : f"컨테이너 {_cntr_type}",
+                                    "assigned_plt"  : _cplt,
+                                    "max_plt_cap"   : _max_cap,
+                                    "boxes_per_plt" : _3d_spec["boxes_per_plt"],
+                                    "box_layers"    : _3d_layers,
+                                    "box_type"      : _box_type,
+                                    "container_type": _cntr_type,
+                                    "plt_h_override": _3d_plt_h,
+                                    "has_pkg"       : _3d_spec["has_pkg"],
+                                    "is_lowbed"     : False,
+                                }],
+                                resolved_items=[{
+                                    "name": _grp, "code": _grp,
+                                    "plt_w": _3d_spec["plt_w"], "plt_l": _3d_spec["plt_l"],
+                                    "pallets": _cplt,
+                                }],
+                                mode="container"
+                            )
+                # 문의 버튼은 별도 행
                 if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="cntr_query_btn"):
                     grp_summary = ", ".join(f"{g}({group_weights.get(g,0):,.0f}kg)" for g in selected_groups)
                     sim_summary = (
                         f"포장재: {selected_packing}\n"
                         f"자재그룹: {grp_summary}\n"
                         f"목표 중량: {total_target_weight:,.0f}kg\n"
-                        f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT"
+                        f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT\n"
+                        f"컨테이너: {_cntr_type} {len(_cntr_list)}대"
                     )
                     show_simulator_inquiry_popup("수출 포장량 시뮬레이터", sim_summary)
         else:
             st.info("자재그룹과 포장재를 선택하시면 시뮬레이션이 시작됩니다.")
 
     elif current_team == "국내영업팀":
-        st.subheader("🚚 국내 최적 운임 비교", divider="rainbow")
+        st.markdown(
+            '<div style="font-size:17px;font-weight:700;color:var(--text-color);margin:4px 0 2px 0;line-height:1.4;">🚚 국내 최적 운임 비교</div>'
+            '<hr style="height:3px;border:none;border-radius:2px;background:linear-gradient(90deg,#ff6b6b,#ffa500,#ffd700,#7ed957,#4fc3f7,#7c4dff);margin:3px 0 12px 0;">',
+            unsafe_allow_html=True
+        )
 
         # ── 노선 데이터 로드 ───────────────────────────────────────────────
         @st.cache_data(ttl=300)
@@ -1712,8 +2215,11 @@ with st.sidebar:
                 show_simulator_inquiry_popup("국내 최적 운임 비교", sim_summary)
 
         # ── 국내 최적 배차 시뮬레이터 (국내영업팀 전용) ─────────────────────
-        st.markdown("---")
-        st.subheader("🚛 최적 배차 시뮬레이터", divider="rainbow")
+        st.markdown(
+            '<div style="font-size:17px;font-weight:700;color:var(--text-color);margin:4px 0 2px 0;line-height:1.4;">🚛 최적 배차 시뮬레이터</div>'
+            '<hr style="height:3px;border:none;border-radius:2px;background:linear-gradient(90deg,#ff6b6b,#ffa500,#ffd700,#7ed957,#4fc3f7,#7c4dff);margin:3px 0 12px 0;">',
+            unsafe_allow_html=True
+        )
 
         # ── 공통 데이터 로드 ────────────────────────────────────────────────
         @st.cache_data(ttl=300)
@@ -2036,9 +2542,9 @@ with st.sidebar:
 
         # ── 입력 UI ─────────────────────────────────────────────────────────
         with st.container(border=True):
-            st.markdown("##### 📦 자재 입력")
+            st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">📦 자재 입력</div>', unsafe_allow_html=True)
             for i, row_item in enumerate(st.session_state.dom_sim_items):
-                col_code, col_qty, col_del = st.columns([3, 2, 0.7])
+                col_code, col_qty, col_del = st.columns([3, 2, 0.65])
                 with col_code:
                     new_code = st.text_input(
                         f"자재코드 {i+1}", value=row_item["code"],
@@ -2054,10 +2560,10 @@ with st.sidebar:
                     )
                     st.session_state.dom_sim_items[i]["qty"] = new_qty
                 with col_del:
-                    st.markdown("<div style='margin-top:26px;text-align:center;'>", unsafe_allow_html=True)
-                    if st.button("🗑️", key=f"dom_del_{i}", help="행 삭제",
+                    st.markdown("<div style='margin-top:26px;overflow:visible;'>", unsafe_allow_html=True)
+                    if st.button("🗑️", key=f"dom_del_{i}",
                                  disabled=len(st.session_state.dom_sim_items) == 1,
-                                 use_container_width=False):
+                                 use_container_width=True):
                         _del_dom_item(i)
                         st.rerun()
                     st.markdown("</div>", unsafe_allow_html=True)
@@ -2108,7 +2614,7 @@ with st.sidebar:
 
             if resolved:
                 # ── 자재별 적재 계산 카드 ─────────────────────────────────
-                st.markdown("#### 📊 자재별 적재 계산")
+                st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">📊 자재별 적재 계산</div>', unsafe_allow_html=True)
                 for r in resolved:
                     need_plt = r['qty'] / r['max_pc']
                     plt_size = f"{int(r['plt_w']*1000)} × {int(r['plt_l']*1000)} mm"
@@ -2193,7 +2699,7 @@ with st.sidebar:
 """, unsafe_allow_html=True)
 
                 # ── 배차 추천 (분할·혼적 통합) ────────────────────────────
-                st.markdown("#### 🚚 최적 배차 추천")
+                st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">🚚 최적 배차 추천</div>', unsafe_allow_html=True)
                 dispatch_items = [
                     {"pallets": r["pallets"], "weight_kg": r["weight_kg"],
                      "plt_w": r["plt_w"], "plt_l": r["plt_l"]}
@@ -2230,8 +2736,464 @@ with st.sidebar:
                         show_simulator_inquiry_popup("국내 최적 배차 시뮬레이터", sim_summary)
 
 
+
+        # ════════════════════════════════════════════════════════════════════
+        # ── 🎡 컨베어벨트 배차 시뮬레이터 ──────────────────────────────────
+        # ════════════════════════════════════════════════════════════════════
+        st.markdown(
+            '<div style="font-size:17px;font-weight:700;color:var(--text-color);margin:4px 0 2px 0;line-height:1.4;">🎡 컨베어벨트 배차 시뮬레이터</div>'
+            '<hr style="height:3px;border:none;border-radius:2px;background:linear-gradient(90deg,#ff6b6b,#ffa500,#ffd700,#7ed957,#4fc3f7,#7c4dff);margin:3px 0 12px 0;">',
+            unsafe_allow_html=True
+        )
+
+        # ── 컨베어벨트 DB 로드 ────────────────────────────────────────────
+        @st.cache_data(ttl=300)
+        def load_cb_data():
+            import glob as _glob, math as _math
+            search_paths = (
+                _glob.glob("data/source_docs/*V4*.xlsx") +
+                _glob.glob("data/source_docs/*.xlsx") +
+                _glob.glob("/mnt/user-data/uploads/*V4*.xlsx") +
+                _glob.glob("/mnt/user-data/uploads/*.xlsx")
+            )
+            for path in search_paths:
+                try:
+                    xf = pd.ExcelFile(path)
+                    cb_sheet = next((s for s in xf.sheet_names if "컨베어" in s and "규격" in s), None)
+                    if not cb_sheet: continue
+                    df = pd.read_excel(path, sheet_name=cb_sheet, header=0).fillna("")
+                    cols = df.columns.tolist()
+                    def fc(kw): return next((c for c in cols if kw in str(c)), None)
+                    code_col  = fc("자재코드")
+                    desc_col  = fc("자재내역")
+                    grp_col   = fc("자재그룹")
+                    wt_col    = fc("M당")
+                    thick_col = fc("코팅후 포두께")
+                    ply_col   = fc("심체수")
+                    top_col   = fc("상고무")
+                    bot_col   = fc("하고무")
+                    width_col = fc("제품폭")
+                    if not code_col: continue
+                    data = {}
+                    for _, row in df.iterrows():
+                        code = str(row.get(code_col, "")).strip().split(".")[0].strip()
+                        if not code or code in ("nan", ""): continue
+                        def _f(col, default=0.0):
+                            v = str(row.get(col, "")).strip() if col else ""
+                            try: return float(v) if v and v != "nan" else default
+                            except: return default
+                        ply        = _f(ply_col)
+                        thick      = _f(thick_col)
+                        top_r      = _f(top_col)
+                        bot_r      = _f(bot_col)
+                        width_mm   = _f(width_col)
+                        wt_per_m   = _f(wt_col)
+                        grp        = str(row.get(grp_col, "")).strip() if grp_col else ""
+                        is_steel   = "B04" in grp
+                        data[code] = {
+                            "name"      : str(row.get(desc_col, "")).strip() if desc_col else "",
+                            "ply"       : ply,
+                            "thick"     : thick,
+                            "top_r"     : top_r,
+                            "bot_r"     : bot_r,
+                            "width_mm"  : width_mm,
+                            "wt_per_m"  : wt_per_m,
+                            "is_steel"  : is_steel,
+                        }
+                    return data
+                except Exception:
+                    continue
+            return {}
+
+        CB_DATA = load_cb_data()
+
+        # ── 직경 계산 함수 ────────────────────────────────────────────────
+        def calc_roll_diameter(item: dict, length_m: float) -> float:
+            """
+            공식: 포의 총두께 = (상고무 + 하고무) + (PLY * 코팅후포두께 - 0.2)
+            롤 직경 = sqrt(총두께/1000 * 4 * 길이(m) / π + 0.09)
+            B04 스틸벨트: 코팅후포두께=0 → 포두께 컬럼 사용 안 함, 별도 처리 필요
+            """
+            import math as _math
+            ply   = item["ply"]
+            thick = item["thick"]   # 코팅후 포두께
+            top_r = item["top_r"]   # 상고무두께
+            bot_r = item["bot_r"]   # 하고무두께
+
+            if item["is_steel"]:
+                # 스틸 벨트: ply = 심체 직경(mm), top_r = 심체수, bot_r = 하고무
+                # 포의 총두께 = 심체직경(두께로 사용) + 상고무 + 하고무
+                # 단: 스틸은 공식 적용 불가 → 직접 추정
+                steel_dia_mm = ply        # 심체 직경 mm
+                top_rubber   = bot_r      # 상고무 (구조 상 bot_r에 저장됨)
+                bot_rubber   = item.get("bot_r", 5)
+                total_thick  = steel_dia_mm + top_rubber + bot_rubber
+            else:
+                if thick > 0:
+                    total_thick = (top_r + bot_r) + (ply * thick - 0.2)
+                else:
+                    # 코팅후 포두께 없는 경우: 포두께(mm) × ply 추정
+                    total_thick = (top_r + bot_r) + ply * 1.0
+
+            if total_thick <= 0 or length_m <= 0:
+                return 0.0
+
+            dia = _math.sqrt(total_thick / 1000.0 * 4.0 * length_m / 3.14159 + 0.09)
+            return round(dia, 3)
+
+        # ── 입력 UI ──────────────────────────────────────────────────────
+        with st.container(border=True):
+            st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">📦 자재 입력</div>', unsafe_allow_html=True)
+            if "cb_sim_items" not in st.session_state:
+                st.session_state.cb_sim_items = [{"code": "", "length": 100.0, "rolls": 1}]
+
+            def _add_cb(): st.session_state.cb_sim_items.append({"code":"","length":100.0,"rolls":1})
+            def _del_cb(i):
+                if len(st.session_state.cb_sim_items) > 1:
+                    st.session_state.cb_sim_items.pop(i)
+
+            for i, cb_row in enumerate(st.session_state.cb_sim_items):
+                c1, c2, c3, c4 = st.columns([3, 2, 1.5, 0.7])
+                with c1:
+                    new_code = st.text_input(f"자재코드 {i+1}", value=cb_row["code"],
+                        placeholder="예: 6015628", key=f"cb_code_{i}"
+                    ).strip().split(".")[0].strip()
+                    st.session_state.cb_sim_items[i]["code"] = new_code
+                with c2:
+                    new_len = st.number_input(f"길이(m) {i+1}", min_value=0.1, value=float(cb_row["length"]),
+                        step=10.0, key=f"cb_len_{i}")
+                    st.session_state.cb_sim_items[i]["length"] = new_len
+                with c3:
+                    new_rolls = st.number_input(f"롤 수 {i+1}", min_value=1, value=int(cb_row["rolls"]),
+                        step=1, key=f"cb_rolls_{i}")
+                    st.session_state.cb_sim_items[i]["rolls"] = new_rolls
+                with c4:
+                    st.markdown("<div style='margin-top:26px;overflow:visible;'>", unsafe_allow_html=True)
+                    if st.button("🗑️", key=f"cb_del_{i}",
+                                 disabled=len(st.session_state.cb_sim_items)==1,
+                                 use_container_width=True):
+                        _del_cb(i); st.rerun()
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+            if st.button("➕ 롤 추가", use_container_width=True, key="cb_add"):
+                _add_cb(); st.rerun()
+
+        # ── 계산 ─────────────────────────────────────────────────────────
+        cb_active = [it for it in st.session_state.cb_sim_items if it["code"].strip()]
+        if not cb_active:
+            st.info("자재코드, 길이(m), 롤 수를 입력하면 롤 직경과 적합 차량을 계산합니다.")
+        else:
+            cb_resolved, cb_errors = [], []
+            for it in cb_active:
+                code  = it["code"]
+                l_m   = it["length"]
+                rolls = it["rolls"]
+                db    = CB_DATA.get(code)
+                if not db:
+                    partials = [c for c in CB_DATA if code in c]
+                    cb_errors.append(f"**{code}**: {'유사: '+', '.join(partials[:3]) if partials else 'DB에 없음'}")
+                    continue
+                dia = calc_roll_diameter(db, l_m)
+                wt  = db["wt_per_m"] * l_m if db["wt_per_m"] else 0
+                cb_resolved.append({
+                    "code": code, "name": db["name"], "length_m": l_m,
+                    "rolls": rolls, "dia_m": dia, "width_mm": db["width_mm"],
+                    "wt_per_roll": wt, "total_wt": wt * rolls,
+                    "is_steel": db["is_steel"],
+                })
+
+            for e in cb_errors:
+                st.warning(e)
+
+            if cb_resolved:
+                st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">📊 롤 직경 계산 결과</div>', unsafe_allow_html=True)
+                for r in cb_resolved:
+                    _type  = "🔩 스틸벨트" if r["is_steel"] else "🎡 포벨트"
+                    _dia_c = "#ef4444" if r["dia_m"] >= 2.6 else ("#f59e0b" if r["dia_m"] >= 2.0 else "#3b82f6")
+                    _warn  = "⚠️ 로베드 차량 필요!" if r["dia_m"] >= 2.6 else ("주의" if r["dia_m"] >= 2.0 else "")
+                    _wt_cells = ""
+                    if r["wt_per_roll"]:
+                        _wt_cells = (
+                            '<div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);'
+                            'border-radius:8px;padding:7px 10px;text-align:center;">'
+                            '<div style="font-size:11px;opacity:0.6;color:var(--text-color);">롤당 중량</div>'
+                            f'<div style="font-size:13px;font-weight:700;color:var(--text-color);">{r["wt_per_roll"]:,.0f} kg</div>'
+                            '</div>'
+                            '<div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);'
+                            'border-radius:8px;padding:7px 10px;text-align:center;">'
+                            '<div style="font-size:11px;opacity:0.6;color:var(--text-color);">총 중량</div>'
+                            f'<div style="font-size:13px;font-weight:700;color:var(--text-color);">{r["total_wt"]:,.0f} kg</div>'
+                            f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">{r["total_wt"]/1000:.2f} ton</div>'
+                            '</div>'
+                        )
+                    st.markdown(f"""
+<div style="border-radius:10px;padding:12px 16px;margin-bottom:10px;
+            background:var(--secondary-background-color);
+            border:1.5px solid rgba(128,128,128,0.15);">
+  <div style="font-size:13px;font-weight:700;color:var(--text-color);margin-bottom:8px;word-break:break-word;">
+    {_type} &nbsp;🏷️ {r["code"]} | {r["name"][:30]}
+  </div>
+  <div style="display:flex;gap:6px;flex-wrap:wrap;">
+    <div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);border-radius:8px;padding:7px 10px;text-align:center;">
+      <div style="font-size:11px;opacity:0.6;color:var(--text-color);">길이</div>
+      <div style="font-size:13px;font-weight:700;color:var(--text-color);">{r["length_m"]:.0f} m</div>
+    </div>
+    <div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);border-radius:8px;padding:7px 10px;text-align:center;">
+      <div style="font-size:11px;opacity:0.6;color:var(--text-color);">롤 수</div>
+      <div style="font-size:13px;font-weight:700;color:var(--text-color);">{r["rolls"]} 롤</div>
+    </div>
+    <div style="flex:1;min-width:70px;background:rgba(59,130,246,0.10);border-radius:8px;padding:7px 10px;text-align:center;">
+      <div style="font-size:11px;opacity:0.6;color:var(--text-color);">롤 직경</div>
+      <div style="font-size:15px;font-weight:700;color:{_dia_c};">{r["dia_m"]:.3f} m</div>
+      <div style="font-size:11px;color:{_dia_c};">{int(r["dia_m"]*1000)} mm {"　"+_warn if _warn else ""}</div>
+    </div>
+    <div style="flex:1;min-width:70px;background:rgba(128,128,128,0.08);border-radius:8px;padding:7px 10px;text-align:center;">
+      <div style="font-size:11px;opacity:0.6;color:var(--text-color);">제품 폭</div>
+      <div style="font-size:13px;font-weight:700;color:var(--text-color);">{int(r["width_mm"])} mm</div>
+    </div>
+    {_wt_cells}
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+                # ── 차량 추천 (직경 기준, 1열 상차) ─────────────────────
+                st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">🚚 적합 차량 추천</div>', unsafe_allow_html=True)
+
+                # 최대 직경 롤 기준으로 차량 결정
+                max_dia  = max(r["dia_m"] for r in cb_resolved)
+                tot_wt   = sum(r["total_wt"] for r in cb_resolved)
+                tot_rolls= sum(r["rolls"] for r in cb_resolved)
+                max_width_m = max(r["width_mm"] for r in cb_resolved) / 1000
+
+                if max_dia >= 2.6:
+                    st.error(
+                        f"🚛 **로베드(Low-bed) 차량 필요** | 최대 직경 {max_dia:.3f}m (≥ 2.6m)\n\n"
+                        "제품 높이 2.6m 이상은 로베드 전용 특수 차량이 필요합니다. 물류팀에 직접 문의하세요."
+                    )
+                else:
+                    # 직경(높이)과 폭 기준으로 적합 차량 필터
+                    # 1열 상차 차량 필터 기준:
+                    # - 폭: 차량 적재함 폭 ≥ max(롤 직경, 제품 폭)
+                    #   (롤이 둥글기 때문에 직경이 곧 필요 폭)
+                    # - 높이: 컨베어벨트 롤은 적재함 위로 돌출 가능
+                    #   도로법 기준 지상 최대 4.0m / 차량 바닥 높이 약 1.2m
+                    #   → 최대 허용 직경 = 4.0 - 1.2 = 2.8m
+                    #   → 2.6m 이상은 이미 로베드 분기에서 처리됨
+                    #   따라서 여기서는 높이 체크 불필요 (폭·중량만 체크)
+                    # - 길이: 직경 × 롤 수 (1열 배치)
+                    # - 중량: 총 중량 ≤ 차량 최대 허용 중량
+                    CB_VEHICLES = [
+                        {"name":"1톤(1.2톤)", "wt":1.32, "length":2.8, "width":1.6,  "height":2.2},
+                        {"name":"2.5톤",      "wt":2.75, "length":4.3, "width":1.8,  "height":2.2},
+                        {"name":"3.5톤(신규)","wt":3.85, "length":4.8, "width":2.0,  "height":2.2},
+                        {"name":"5톤",        "wt":5.5,  "length":6.2, "width":2.34, "height":2.2},
+                        {"name":"8톤",        "wt":8.2,  "length":7.4, "width":2.34, "height":2.2},
+                        {"name":"11톤",       "wt":12.0, "length":9.0, "width":2.34, "height":2.2},
+                        {"name":"18톤",       "wt":19.0, "length":10.1,"width":2.34, "height":2.2},
+                        {"name":"25톤",       "wt":25.5, "length":10.1,"width":2.34, "height":2.2},
+                        {"name":"트레일러",   "wt":25.0, "length":12.0,"width":2.34, "height":2.2},
+                    ]
+                    candidates = []
+                    for v in CB_VEHICLES:
+                        # 폭 체크: 적재함 폭 ≥ max(롤 직경, 제품 폭)
+                        need_w = max(max_dia, max_width_m)
+                        if v["width"] < need_w:
+                            continue
+                        # 길이 체크: 직경 × 롤 수
+                        need_l = max_dia * tot_rolls
+                        vol_ok = v["length"] >= need_l
+                        wt_ok  = (tot_wt / 1000) <= v["wt"]
+                        candidates.append({**v, "need_l": need_l, "vol_ok": vol_ok, "wt_ok": wt_ok})
+
+                    ok_both = [c for c in candidates if c["vol_ok"] and c["wt_ok"]]
+                    ok_vol  = [c for c in candidates if not c["wt_ok"]]
+
+                    if ok_both:
+                        best_cb = ok_both[0]
+                        need_l  = best_cb["need_l"]
+                        st.success(f"**추천 차량: {best_cb['name']}**")
+                        _height_note = ""
+                        if max_dia > best_cb["height"]:
+                            _ground_h = 1.2 + max_dia
+                            _height_note = (
+                                f"  \n⚠️ 롤 직경({max_dia:.2f}m)이 적재함 높이({best_cb['height']}m)를 초과 → "
+                                f"상단 돌출 상차 | 지상 높이 약 {_ground_h:.2f}m (도로법 4.0m 이하 ✅)"
+                            )
+                        st.markdown(
+                            f"📏 적재함 {best_cb['length']}m × {best_cb['width']}m | "
+                            f"⚖️ 최대 {best_cb['wt']}ton | "
+                            f"🎡 롤 1열 필요 길이 {need_l:.2f}m ({max_dia:.2f}m × {tot_rolls}롤)"
+                            + _height_note
+                        )
+                    elif candidates:
+                        best_cb = candidates[0]
+                        need_l  = best_cb["need_l"]
+                        st.warning(
+                            f"⚠️ **{best_cb['name']}** (중량 초과 가능성) | "
+                            f"총 중량 {tot_wt/1000:.2f}ton / 허용 {best_cb['wt']}ton"
+                        )
+                    else:
+                        best_cb = None
+                        need_l  = max_dia * tot_rolls
+                        st.warning("⚠️ 적합한 일반 차량이 없습니다. 직경/중량 초과 — 물류팀에 문의하세요.")
+
+                    # ── 3D 버튼 ───────────────────────────────────────────
+                    if best_cb and st.button("🧊 3D 입체 보기 (컨베어벨트)", use_container_width=True, key="cb_3d_btn"):
+                        import plotly.graph_objects as _go
+                        import math as _math
+                        import numpy as _np
+
+                        _fig = _go.Figure()
+                        car_l = best_cb["length"]
+                        car_w = best_cb["width"]
+                        car_h = best_cb["height"]
+
+                        # 적재함 외곽
+                        for _tr in _make_wireframe(car_l, car_w, car_h, "#888888"):
+                            _fig.add_trace(_tr)
+                        # 바닥
+                        _fig.add_trace(_go.Mesh3d(
+                            x=[0,car_l,car_l,0], y=[0,0,car_w,car_w], z=[0,0,0,0],
+                            i=[0,0], j=[1,2], k=[2,3],
+                            color="#CCCCCC", opacity=0.12, showlegend=False, hoverinfo="skip"
+                        ))
+
+                        # 가이드라인: 높이 2.6m
+                        if 2.6 <= car_h + 0.5:
+                            _fig.add_trace(_go.Scatter3d(
+                                x=[0, car_l, car_l, 0, 0],
+                                y=[0, 0, car_w, car_w, 0],
+                                z=[2.6]*5,
+                                mode="lines",
+                                line=dict(color="#ef4444", width=3, dash="dash"),
+                                name="⚠️ 높이 2.6m (로베드 기준)",
+                                showlegend=True, hoverinfo="name"
+                            ))
+
+                        # 롤 원통 렌더링 (근사: 다각형 실린더)
+                        _theta  = _np.linspace(0, 2*_np.pi, 32)
+                        _cx     = 0.0   # 시작 위치 (X=길이 방향)
+                        _PALETTE_CB = ["#4C9BE8","#F4845F","#63C9A8","#E8C34C","#A878D8"]
+
+                        for ri, r in enumerate(cb_resolved):
+                            _dia  = r["dia_m"]
+                            _r    = _dia / 2
+                            _w_m  = r["width_mm"] / 1000  # 벨트 폭 = 실린더 길이(Y축)
+                            _color = _PALETTE_CB[ri % len(_PALETTE_CB)]
+                            _yc   = _w_m / 2   # 폭 방향 중심
+                            _zc   = _r         # 높이 방향 중심(바닥에서 반지름)
+
+                            for roll_i in range(r["rolls"]):
+                                _xc  = _cx + _r
+                                _lbl = (f"{r['code']} 롤{roll_i+1} (Ø{_dia:.2f}m)"
+                                        if roll_i == 0 else f"__hidden_cb_{ri}_{roll_i}")
+                                _is_hid = _lbl.startswith("__hidden")
+
+                                # ── Surface로 완전한 원통 렌더링 ──────────────
+                                # theta: 0~2π를 SEG+1개 (endpoint=True → 마지막=첫점, 완전 닫힘)
+                                # x축(길이방향): [앞면 X, 뒷면 X] 2개
+                                _SEG  = 60   # 더 많은 분할로 매끄러운 원
+                                _angs = _np.linspace(0, 2*_np.pi, _SEG + 1)  # SEG+1로 닫힌 원
+                                _cos  = _np.cos(_angs)
+                                _sin  = _np.sin(_angs)
+
+                                # Surface: x[2, SEG+1], y[2, SEG+1], z[2, SEG+1]
+                                _sx = _np.array([
+                                    [_xc]       * (_SEG + 1),  # 앞면
+                                    [_xc + _w_m] * (_SEG + 1), # 뒷면
+                                ])
+                                _sy = _np.array([
+                                    _yc + _r * _cos,
+                                    _yc + _r * _cos,
+                                ])
+                                _sz = _np.array([
+                                    _zc + _r * _sin,
+                                    _zc + _r * _sin,
+                                ])
+
+                                # hex color → rgb tuple for colorscale
+                                import struct as _struct
+                                _hx = _color.lstrip('#')
+                                _cr, _cg, _cb_v = tuple(int(_hx[i:i+2], 16) for i in (0,2,4))
+                                _cscale = [[0, f'rgb({_cr},{_cg},{_cb_v})'],
+                                           [1, f'rgb({_cr},{_cg},{_cb_v})']]
+
+                                _fig.add_trace(_go.Surface(
+                                    x=_sx, y=_sy, z=_sz,
+                                    colorscale=_cscale,
+                                    showscale=False,
+                                    opacity=0.80,
+                                    name="" if _is_hid else _lbl,
+                                    showlegend=not _is_hid,
+                                    hovertemplate=(
+                                        f"<b>{r['code']}</b><br>"
+                                        f"직경: {_dia:.3f}m | 폭: {r['width_mm']:.0f}mm<br>"
+                                        f"중량: {r['wt_per_roll']:,.0f}kg<extra></extra>"
+                                        if not _is_hid else "<extra></extra>"
+                                    ),
+                                    contours=dict(
+                                        x=dict(highlight=False),
+                                        y=dict(highlight=False),
+                                        z=dict(highlight=False),
+                                    )
+                                ))
+
+                                # 앞면·뒷면 원 테두리 (Surface가 자동 닫히지만 테두리 강조)
+                                for _x0 in [_xc, _xc + _w_m]:
+                                    _fig.add_trace(_go.Scatter3d(
+                                        x=[_x0] * (_SEG + 1),
+                                        y=list(_sy[0]),
+                                        z=list(_sz[0]),
+                                        mode="lines",
+                                        line=dict(color=_color, width=2),
+                                        showlegend=False, hoverinfo="skip"
+                                    ))
+
+                                _cx += _dia   # 다음 롤 위치
+
+                        _fig.update_layout(
+                            scene=dict(
+                                xaxis=dict(range=[0, car_l], title="길이 (m)"),
+                                yaxis=dict(range=[0, car_w], title="폭 (m)"),
+                                zaxis=dict(range=[0, max(car_h, max_dia+0.2)], title="높이 (m)"),
+                                aspectmode="manual",
+                                aspectratio=dict(x=max(car_l,0.1)/max(car_w,0.1), y=1,
+                                                 z=max(car_h,0.1)/max(car_w,0.1)),
+                                camera=dict(eye=dict(x=1.5, y=-2.0, z=1.3))
+                            ),
+                            margin=dict(l=0,r=0,b=0,t=30),
+                            legend=dict(font=dict(size=11), x=0, y=1)
+                        )
+
+                        # 안내 카드
+                        _guide_h = (
+                            '<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">'
+                            f'<div style="flex:1;min-width:110px;background:rgba(59,130,246,0.08);border-radius:8px;padding:7px 12px;border:1.5px solid rgba(59,130,246,0.2);">'
+                            f'<div style="font-size:11px;opacity:0.6;color:var(--text-color);">추천 차량</div>'
+                            f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{best_cb["name"]}</div>'
+                            f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">{best_cb["length"]}m × {best_cb["width"]}m</div></div>'
+                            f'<div style="flex:1;min-width:110px;background:rgba(128,128,128,0.06);border-radius:8px;padding:7px 12px;border:1.5px solid rgba(128,128,128,0.15);">'
+                            f'<div style="font-size:11px;opacity:0.6;color:var(--text-color);">최대 직경</div>'
+                            f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{max_dia:.3f} m</div>'
+                            f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">{int(max_dia*1000)} mm</div></div>'
+                            f'<div style="flex:1;min-width:110px;background:rgba(128,128,128,0.06);border-radius:8px;padding:7px 12px;border:1.5px solid rgba(128,128,128,0.15);">'
+                            f'<div style="font-size:11px;opacity:0.6;color:var(--text-color);">총 롤 수 / 중량</div>'
+                            f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{tot_rolls} 롤</div>'
+                            f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">{tot_wt:,.0f} kg ({tot_wt/1000:.2f} ton)</div></div>'
+                            '</div>'
+                        )
+                        st.session_state["cb_3d_data"] = {
+                            "fig": _fig,
+                            "guide_html": _guide_h,
+                        }
+                        show_cb_3d_popup()
+
     elif current_team == "트랙영업팀":
-        st.subheader("🚜 크롤러 배차 시뮬레이터", divider="rainbow")
+        st.markdown(
+            '<div style="font-size:17px;font-weight:700;color:var(--text-color);margin:4px 0 2px 0;line-height:1.4;">🚜 크롤러 배차 시뮬레이터</div>'
+            '<hr style="height:3px;border:none;border-radius:2px;background:linear-gradient(90deg,#ff6b6b,#ffa500,#ffd700,#7ed957,#4fc3f7,#7c4dff);margin:3px 0 12px 0;">',
+            unsafe_allow_html=True
+        )
 
         # ── DB(Excel)에서 크롤러 자재 데이터 로드 ──────────────────────────
         @st.cache_data(ttl=300)
@@ -2336,9 +3298,9 @@ with st.sidebar:
 
         # ── 입력 UI ─────────────────────────────────────────────────────────
         with st.container(border=True):
-            st.markdown("##### 📦 자재 입력")
+            st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">📦 자재 입력</div>', unsafe_allow_html=True)
             for i, row_item in enumerate(st.session_state.trk_sim_items):
-                col_code, col_qty, col_del = st.columns([3, 2, 0.7])
+                col_code, col_qty, col_del = st.columns([3, 2, 0.65])
                 with col_code:
                     new_code = st.text_input(
                         f"자재코드 {i+1}", value=row_item["code"],
@@ -2354,15 +3316,15 @@ with st.sidebar:
                     )
                     st.session_state.trk_sim_items[i]["qty"] = new_qty
                 with col_del:
-                    st.markdown("<div style='margin-top:26px;text-align:center;'>", unsafe_allow_html=True)
-                    if st.button("🗑️", key=f"trk_del_{i}", help="행 삭제",
+                    st.markdown("<div style='margin-top:26px;overflow:visible;'>", unsafe_allow_html=True)
+                    if st.button("🗑️", key=f"trk_del_{i}",
                                  disabled=len(st.session_state.trk_sim_items) == 1,
-                                 use_container_width=False):
+                                 use_container_width=True):
                         _del_trk_item(i)
                         st.rerun()
                     st.markdown("</div>", unsafe_allow_html=True)
 
-            if st.button("➕ 자재 추가 (혼적)", use_container_width=True, key="trk_add_item"):
+            if st.button("자재 추가 (혼적)", use_container_width=True, key="trk_add_item"):
                 _add_trk_item()
                 st.rerun()
 
@@ -2405,7 +3367,7 @@ with st.sidebar:
 
             if resolved_trk:
                 # ── 자재별 적재 계산 카드 ─────────────────────────────────
-                st.markdown("#### 📊 자재별 적재 계산")
+                st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">📊 자재별 적재 계산</div>', unsafe_allow_html=True)
                 for r in resolved_trk:
                     need_plt = r['qty'] / r['max_pc']
                     plt_size = f"{int(r['plt_w']*1000)} × {int(r['plt_l']*1000)} mm"
@@ -2489,7 +3451,7 @@ with st.sidebar:
 """, unsafe_allow_html=True)
 
                 # ── 배차 추천 ────────────────────────────────────────────
-                st.markdown("#### 🚚 최적 배차 추천")
+                st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">🚚 최적 배차 추천</div>', unsafe_allow_html=True)
                 dispatch_items_trk = [
                     {"pallets": r["pallets"], "weight_kg": r["weight_kg"],
                      "plt_w": r["plt_w"], "plt_l": r["plt_l"]}
