@@ -3010,18 +3010,57 @@ with st.sidebar:
                                 showlegend=True, hoverinfo="name"
                             ))
 
-                        # 롤 원통 렌더링 (근사: 다각형 실린더)
-                        _theta  = _np.linspace(0, 2*_np.pi, 32)
-                        _cx     = 0.0   # 시작 위치 (X=길이 방향)
+                        # ── 롤 원통 렌더링 (리얼 적재 표현) ──────────────────
+                        # 좌표계:
+                        #   X축 = 적재함 길이 방향 → 롤을 직경 간격으로 나열
+                        #   Y축 = 적재함 폭 방향  → 실린더 축 (벨트 폭 = 실린더 길이)
+                        #   Z축 = 높이
+                        # 개선사항:
+                        #   1) 롤 그룹 전체를 X/Y 중앙에 배치
+                        #   2) 롤 중심을 관통하는 샤프트(봉) 렌더링 → 체인 관통 느낌
+                        #   3) 앞·뒷면 캡(원판) 추가 → 리얼한 롤 형태
+                        #   4) 샤프트 양 끝 마감 캡 추가
                         _PALETTE_CB = ["#4C9BE8","#F4845F","#63C9A8","#E8C34C","#A878D8"]
+                        _SEG  = 72   # 원 분할 수
+                        _angs = _np.linspace(0, 2 * _np.pi, _SEG + 1)
+
+                        # ── 전체 롤 그룹의 X/Y 총 길이 계산 → 중앙 오프셋 결정
+                        _total_x = sum(r["dia_m"] for r in cb_resolved
+                                       for _ in range(r["rolls"]))
+                        _max_w_m = max(r["width_mm"] for r in cb_resolved) / 1000
+                        _x_offset = (car_l - _total_x) / 2   # X 중앙 정렬 여백
+                        _y_offset = (car_w - _max_w_m) / 2   # Y 중앙 정렬 여백
+                        _x_offset = max(_x_offset, 0.0)       # 음수 방지
+                        _y_offset = max(_y_offset, 0.0)
+
+                        _cx = _x_offset   # 롤 배치 시작 X 위치
 
                         for ri, r in enumerate(cb_resolved):
-                            _dia  = r["dia_m"]
-                            _r    = _dia / 2
-                            _w_m  = r["width_mm"] / 1000  # 벨트 폭 = 실린더 길이(Y축)
+                            _dia   = r["dia_m"]
+                            _r     = _dia / 2
+                            _w_m   = r["width_mm"] / 1000
                             _color = _PALETTE_CB[ri % len(_PALETTE_CB)]
-                            _yc   = _w_m / 2   # 폭 방향 중심
-                            _zc   = _r         # 높이 방향 중심(바닥에서 반지름)
+                            _zc    = _r   # 바닥에서 반지름 높이
+
+                            # Y: 롤을 차량 폭 중앙에 배치 (각 롤의 폭이 달라도 중앙 정렬)
+                            _y_front = _y_offset + ((_max_w_m - _w_m) / 2)
+                            _y_back  = _y_front + _w_m
+                            _y_cen   = (_y_front + _y_back) / 2
+
+                            # hex → rgb
+                            _hx = _color.lstrip('#')
+                            _cr, _cg, _cb_v = tuple(int(_hx[i:i+2], 16) for i in (0, 2, 4))
+                            # 측면용 colorscale (약간 밝게)
+                            _cscale_side = [[0, f'rgb({_cr},{_cg},{_cb_v})'],
+                                            [1, f'rgb({_cr},{_cg},{_cb_v})']]
+                            # 캡(앞뒤 원판)용: 조금 어둡게 → 깊이감
+                            _dr = max(0, _cr - 40); _dg = max(0, _cg - 40); _db = max(0, _cb_v - 40)
+                            _cscale_cap = [[0, f'rgb({_dr},{_dg},{_db})'],
+                                           [1, f'rgb({_dr},{_dg},{_db})']]
+
+                            # 샤프트(봉) 반지름: 롤 직경의 8% (체인 축처럼)
+                            _shaft_r = _r * 0.08
+                            _shaft_r = max(_shaft_r, 0.02)  # 최소 2cm
 
                             for roll_i in range(r["rolls"]):
                                 _xc  = _cx + _r
@@ -3029,40 +3068,17 @@ with st.sidebar:
                                         if roll_i == 0 else f"__hidden_cb_{ri}_{roll_i}")
                                 _is_hid = _lbl.startswith("__hidden")
 
-                                # ── Surface로 완전한 원통 렌더링 ──────────────
-                                # theta: 0~2π를 SEG+1개 (endpoint=True → 마지막=첫점, 완전 닫힘)
-                                # x축(길이방향): [앞면 X, 뒷면 X] 2개
-                                _SEG  = 60   # 더 많은 분할로 매끄러운 원
-                                _angs = _np.linspace(0, 2*_np.pi, _SEG + 1)  # SEG+1로 닫힌 원
-                                _cos  = _np.cos(_angs)
-                                _sin  = _np.sin(_angs)
+                                _y_grid = _np.array([_y_front, _y_back])
 
-                                # Surface: x[2, SEG+1], y[2, SEG+1], z[2, SEG+1]
-                                _sx = _np.array([
-                                    [_xc]       * (_SEG + 1),  # 앞면
-                                    [_xc + _w_m] * (_SEG + 1), # 뒷면
-                                ])
-                                _sy = _np.array([
-                                    _yc + _r * _cos,
-                                    _yc + _r * _cos,
-                                ])
-                                _sz = _np.array([
-                                    _zc + _r * _sin,
-                                    _zc + _r * _sin,
-                                ])
-
-                                # hex color → rgb tuple for colorscale
-                                import struct as _struct
-                                _hx = _color.lstrip('#')
-                                _cr, _cg, _cb_v = tuple(int(_hx[i:i+2], 16) for i in (0,2,4))
-                                _cscale = [[0, f'rgb({_cr},{_cg},{_cb_v})'],
-                                           [1, f'rgb({_cr},{_cg},{_cb_v})']]
+                                # ── ① 측면 Surface (벨트 롤 외형) ─────────────
+                                _surf_x = _np.outer(_np.ones(2), _xc + _r * _np.cos(_angs))
+                                _surf_y = _np.outer(_y_grid, _np.ones(_SEG + 1))
+                                _surf_z = _np.outer(_np.ones(2), _zc + _r * _np.sin(_angs))
 
                                 _fig.add_trace(_go.Surface(
-                                    x=_sx, y=_sy, z=_sz,
-                                    colorscale=_cscale,
-                                    showscale=False,
-                                    opacity=0.80,
+                                    x=_surf_x, y=_surf_y, z=_surf_z,
+                                    colorscale=_cscale_side,
+                                    showscale=False, opacity=0.88,
                                     name="" if _is_hid else _lbl,
                                     showlegend=not _is_hid,
                                     hovertemplate=(
@@ -3078,18 +3094,80 @@ with st.sidebar:
                                     )
                                 ))
 
-                                # 앞면·뒷면 원 테두리 (Surface가 자동 닫히지만 테두리 강조)
-                                for _x0 in [_xc, _xc + _w_m]:
+                                # ── ② 앞·뒷면 캡 (원판) → 리얼한 롤 단면 표현 ──
+                                # 캡: 반지름 방향으로 r_inner(샤프트) ~ r_outer(벨트) 채움
+                                _CAP_R  = 20   # 반지름 방향 분할
+                                _radii  = _np.linspace(_shaft_r, _r, _CAP_R)
+                                for _y_cap in [_y_front, _y_back]:
+                                    _cap_x = _np.outer(_radii, _np.cos(_angs)) + _xc
+                                    _cap_y = _np.full((_CAP_R, _SEG + 1), _y_cap)
+                                    _cap_z = _np.outer(_radii, _np.sin(_angs)) + _zc
+                                    _fig.add_trace(_go.Surface(
+                                        x=_cap_x, y=_cap_y, z=_cap_z,
+                                        colorscale=_cscale_cap,
+                                        showscale=False, opacity=0.95,
+                                        showlegend=False, hoverinfo="skip",
+                                        contours=dict(
+                                            x=dict(highlight=False),
+                                            y=dict(highlight=False),
+                                            z=dict(highlight=False),
+                                        )
+                                    ))
+
+                                # ── ③ 테두리 링 (앞·뒷면 외곽선) ───────────────
+                                _circ_x = list(_xc + _r * _np.cos(_angs))
+                                _circ_z = list(_zc + _r * _np.sin(_angs))
+                                for _y0 in [_y_front, _y_back]:
                                     _fig.add_trace(_go.Scatter3d(
-                                        x=[_x0] * (_SEG + 1),
-                                        y=list(_sy[0]),
-                                        z=list(_sz[0]),
+                                        x=_circ_x, y=[_y0]*(_SEG+1), z=_circ_z,
                                         mode="lines",
                                         line=dict(color=_color, width=2),
                                         showlegend=False, hoverinfo="skip"
                                     ))
 
-                                _cx += _dia   # 다음 롤 위치
+                                # ── ④ 샤프트 (중심 관통봉) ──────────────────────
+                                # Y축 방향으로 롤 폭 + 양쪽 20cm 돌출
+                                _shaft_ext = 0.20   # 양끝 돌출 길이(m)
+                                _sy0 = _y_front - _shaft_ext
+                                _sy1 = _y_back  + _shaft_ext
+                                _s_grid = _np.array([_sy0, _sy1])
+                                _shaft_cos = _np.cos(_angs)
+                                _shaft_sin = _np.sin(_angs)
+
+                                # 샤프트 측면
+                                _sh_x = _np.outer(_np.ones(2), _xc + _shaft_r * _shaft_cos)
+                                _sh_y = _np.outer(_s_grid, _np.ones(_SEG + 1))
+                                _sh_z = _np.outer(_np.ones(2), _zc + _shaft_r * _shaft_sin)
+                                _fig.add_trace(_go.Surface(
+                                    x=_sh_x, y=_sh_y, z=_sh_z,
+                                    colorscale=[[0,"rgb(160,160,170)"],[1,"rgb(220,220,230)"]],
+                                    showscale=False, opacity=1.0,
+                                    showlegend=False, hoverinfo="skip",
+                                    contours=dict(
+                                        x=dict(highlight=False),
+                                        y=dict(highlight=False),
+                                        z=dict(highlight=False),
+                                    )
+                                ))
+                                # 샤프트 끝 캡
+                                _sh_cap_r = _np.linspace(0, _shaft_r, 5)
+                                for _sy_cap in [_sy0, _sy1]:
+                                    _sc_x = _np.outer(_sh_cap_r, _np.cos(_angs)) + _xc
+                                    _sc_y = _np.full((5, _SEG + 1), _sy_cap)
+                                    _sc_z = _np.outer(_sh_cap_r, _np.sin(_angs)) + _zc
+                                    _fig.add_trace(_go.Surface(
+                                        x=_sc_x, y=_sc_y, z=_sc_z,
+                                        colorscale=[[0,"rgb(140,140,150)"],[1,"rgb(200,200,210)"]],
+                                        showscale=False, opacity=1.0,
+                                        showlegend=False, hoverinfo="skip",
+                                        contours=dict(
+                                            x=dict(highlight=False),
+                                            y=dict(highlight=False),
+                                            z=dict(highlight=False),
+                                        )
+                                    ))
+
+                                _cx += _dia   # 다음 롤: X방향으로 직경 간격
 
                         _fig.update_layout(
                             scene=dict(
