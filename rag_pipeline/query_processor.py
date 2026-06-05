@@ -2,14 +2,14 @@ import os
 import time
 import json
 import logging
-import requests
 import hashlib
 import re
 import smtplib
+import openai
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 from pydantic import PrivateAttr
 from langchain_core.prompts import ChatPromptTemplate
@@ -17,7 +17,7 @@ from langchain_core.language_models.llms import LLM
 from langchain_qdrant import Qdrant
 from langchain_ollama import OllamaEmbeddings 
 from qdrant_client import QdrantClient, models
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
 from ddgs import DDGS
 from functools import lru_cache
 import threading
@@ -31,26 +31,29 @@ logger = logging.getLogger(__name__)
 
 # 환경 변수
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "logistics_data")
-QDRANT_HOST = os.getenv("QDRANT_HOST", "http://localhost:6333")
+QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
+QDRANT_PORT = os.getenv("QDRANT_PORT", "6333")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", None)
 LEARNING_COLLECTION = os.getenv("LEARNING_COLLECTION", "learning_history")
 BAD_FEEDBACK_COLLECTION = os.getenv("BAD_FEEDBACK_COLLECTION", "bad_feedback_history")
 
-# 이메일 설정 (환경 변수에서 가져오기)
+# 이메일 설정
 EMAIL_ENABLED = os.getenv("EMAIL_ENABLED", "false").lower() == "true"
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 EMAIL_FROM = os.getenv("EMAIL_FROM", SMTP_USERNAME)
-EMAIL_TO = os.getenv("EMAIL_TO", "").split(",")  # 쉼표로 구분된 수신자 목록
+EMAIL_TO = os.getenv("EMAIL_TO", "").split(",")
 
 # 로깅 전용 컬렉션
 QUERY_LOG_COLLECTION = "query_logs"
 ANSWER_LOG_COLLECTION = "answer_logs"
 
-ONPREMISE_API_URL = os.getenv("ONPREMISE_API_URL", "http://192.168.1.121:11436/v1/chat/completions")
-ONPREMISE_MODEL = os.getenv("ONPREMISE_MODEL", "ISTA-DASLab/gemma-3-27b-it-GPTQ-4b-128g")
-ONPREMISE_TIMEOUT = int(os.getenv("ONPREMISE_TIMEOUT", "60"))
+ONPREMISE_API_URL = os.getenv("ONPREMISE_API_URL", "http://192.168.1.128:9800")
+ONPREMISE_MODEL   = os.getenv("ONPREMISE_MODEL",   "gpt-oss-120b")
+ONPREMISE_API_KEY = os.getenv("ONPREMISE_API_KEY",  "")
+ONPREMISE_TIMEOUT = int(os.getenv("ONPREMISE_TIMEOUT", "120"))
 OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "granite-embedding:278m")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
@@ -59,9 +62,255 @@ CACHE_TTL = 300
 response_cache = {}
 cache_lock = threading.Lock()
 
-# 개선된 프롬프트
-PROMPT_TEMPLATE = """당신은 DRB 물류 전문 AI 어시스턴트입니다.
-아래 [참고 데이터]를 바탕으로 사용자의 질문에 답변하세요.
+# ══════════════════════════════════════════════════════════════
+# 시뮬레이터 유도 안내
+# ══════════════════════════════════════════════════════════════
+SIMULATOR_GUIDE = {
+    "컨베어벨트배차": {
+        "keywords": [
+            # 자재코드(7자리) + 직경/길이/롤 조합
+            "직경 계산", "롤 직경", "직경을 계산", "직경이 얼마",
+            "직경 얼마", "직경 구해", "직경 알려",
+            "롤 계산", "1롤일때", "롤일때", "롤 직경",
+            "컨베어 계산", "컨베이어 계산",
+            "m 1롤", "m일때 직경", "길이 직경",
+        ],
+        "msg": (
+            "💡 **컨베어벨트 직경 계산은 시뮬레이터를 이용해주세요!**\n\n"
+            "자재코드·길이(m)·롤 수를 입력하면 롤 직경과 적합 차량을 자동 계산합니다.\n"
+            "좌측 메뉴 → **[컨베어벨트배차 시뮬레이터]** 를 클릭해보세요."
+        ),
+    },
+    "국내운임비교": {
+        "keywords": [
+            # 운임 직접 언급
+            "운임 비교", "운임비교", "운송비 얼마", "택배비 얼마",
+            "화물 요금", "배송비 얼마", "톤수별 운임", "운임 계산",
+            # 지역 + 운송/배차 조합
+            "부산에서", "에서 광주", "에서 서울", "에서 대구", "에서 인천",
+            "에서 수원", "에서 대전", "에서 울산", "에서 창원",
+            # 중량 + 운송/배차/방법 조합
+            "kg 운송", "ton 운송", "톤 운송",
+            "kg 배차", "ton 배차",
+            "최적의 배차", "최적 배차", "배차를 알려", "배차 알려줘",
+            "운송 방법", "운반 방법", "어떻게 보내", "어떤 차량으로",
+            "직송이야", "화물이야", "택배야", "화물로 보내", "직송으로",
+        ],
+        "msg": (
+            "💡 **국내 운임 비교는 시뮬레이터를 이용해주세요!**\n\n"
+            "지역·중량을 입력하면 화물/택배/직송 중 최적 운송방식과 운임을 자동 계산합니다.\n"
+            "좌측 메뉴 → **[국내운임비교 시뮬레이터]** 를 클릭해보세요."
+        ),
+    },
+    "수출포장량": {
+        "keywords": [
+            "박스 몇 개", "몇 박스", "수출 포장 몇",
+            "650 몇개", "1090 몇개", "마대 몇개", "박스 수량 계산",
+            "몇 박스 나와", "몇개 나와",
+        ],
+        "msg": (
+            "💡 **수출 포장량 계산은 시뮬레이터를 이용해주세요!**\n\n"
+            "자재그룹·중량을 입력하면 자동으로 계산됩니다.\n"
+            "좌측 메뉴 → **[수출포장량 시뮬레이터]** 를 클릭해보세요."
+        ),
+    },
+    "국내최적배차": {
+        "keywords": [
+            "크롤러 배차", "러버트랙 배차", "RT 배차",
+            "크롤러 몇 대", "크롤러 차량 몇", "배차 계산",
+            "차량 몇 대 필요", "크롤러 몇 톤", "러버트랙 몇 대",
+        ],
+        "msg": (
+            "💡 **크롤러 배차 계산은 시뮬레이터를 이용해주세요!**\n\n"
+            "자재코드·수량을 입력하면 적정 차량을 자동 추천합니다.\n"
+            "좌측 메뉴 → **[국내최적배차 시뮬레이터]** 를 클릭해보세요."
+        ),
+    },
+}
+
+def check_simulator_intent(query: str) -> str | None:
+    """시뮬레이터 처리 가능 질문이면 유도 메시지 반환, 아니면 None"""
+    q = query.strip()
+    for sim_name, info in SIMULATOR_GUIDE.items():
+        if any(kw in q for kw in info["keywords"]):
+            return info["msg"]
+    return None
+
+# ══════════════════════════════════════════════════════════════
+# 격주 기사 노선 기준
+# ══════════════════════════════════════════════════════════════
+# 5/28(목)이 속한 주 월요일 = 5/26 → B주(이용구 노선 운행주)
+BIWEEKLY_ANCHOR_DATE = date(2026, 5, 25)  # 5/28 적용 시작주의 월요일 (B주=이용구 기준)
+
+def get_week_group(target: date = None) -> str:
+    """오늘(또는 target)이 A주인지 B주인지 반환. B주=이용구, A주=심효섭"""
+    if target is None:
+        target = date.today()
+    monday = target - timedelta(days=target.weekday())
+    weeks_elapsed = (monday - BIWEEKLY_ANCHOR_DATE).days // 7
+    return "B" if weeks_elapsed % 2 == 0 else "A"
+
+# ══════════════════════════════════════════════════════════════
+# 프롬프트 시스템 — 도메인별 분리 구조
+# ══════════════════════════════════════════════════════════════
+
+# ── 통합 프롬프트 (V4 단일 프롬프트 방식 복원 + V5 도메인 분기 유지) ──────
+# V4와 동일하게 모든 규칙을 하나로 통합 → 도메인 분류 오류 시에도 규칙 누락 없음
+_PROMPT_SYSTEM = """당신은 DRB 동일고무벨트 물류팀 전문 AI 어시스턴트입니다.
+아래 [참고 데이터]만을 근거로 답변하세요.
+참고 데이터에 없는 내용은 "해당 정보를 찾을 수 없습니다"라고 말하세요.
+
+[답변 작성 규칙]
+1. 출처 표기 금지: "문서 1", "[문서 2]" 같은 내부 참조 번호를 절대 포함하지 마세요.
+2. 데이터 외 정보 생성 금지: [참고 데이터]에 없는 단어·수치·분류를 임의로 만들거나 조합하지 마세요.
+3. LaTeX 수식 금지: 계산식은 반드시 자연어로만 작성하세요.
+   올바른 예시: 포의 총두께 = (6.4 + 2.4) + (3 × 0.95 - 0.2) = 11.65 mm
+4. 핵심 먼저: 불필요한 서론·인사 없이 핵심 답변부터 바로 시작하세요.
+5. 간결하게: 질문에 직접 관련 없는 부가 설명·추측은 포함하지 마세요.
+6. 정보 통합: 여러 데이터에 걸친 정보는 중복 없이 하나로 합쳐 서술하세요.
+7. 비교·목록은 표로: 여러 항목을 나열하거나 비교할 때는 Markdown 표를 사용하세요.
+8. 없는 정보: 참고 데이터에 없는 내용은 "해당 정보를 찾을 수 없습니다"라고 말하세요.
+9. 배차 계산: '몇 톤', '배차', '차량' 포함 질문 →
+   ① 자재코드로 1파렛트당 최대 적재수량 확인
+   ② 총 수량 ÷ 1파렛트당 수량 = 필요 파렛트 수
+   ③ 파렛트 사이즈와 차량 적재함 폭·길이 비교
+   ④ 조건을 충족하는 가장 작은 차량 추천
+10. 컨베어벨트 직경 계산: '직경', '롤 직경' 포함 질문 →
+    ① 자재코드로 상고무두께·하고무두께·PLY·코팅후포두께 확인
+    ② 포의 총두께 = (상고무두께 + 하고무두께) + (PLY × 코팅후포두께 - 0.2)
+    ③ 롤 직경(m) = √(포의 총두께 ÷ 1000 × 4 × 길이(M) ÷ 3.142 + 0.09)
+    ④ 길이 미입력 시 ①②만 계산 후 "컨베어벨트 길이(M)를 알려주세요" 요청
+    ⑤ 최종 롤 직경(m) + mm 단위 환산값 함께 제시
+11. 담당자/인원 조회:
+    [클레임·문의처 질문 — '클레임','불량','문제','누구한테','연락해야','어디에' 포함 시]
+    ① 해당 공정 주임 1명만 선택
+    ② 해당 공정 담당 팀원 1명만 선택
+    ③ 그 외 인원 절대 포함 금지
+    ④ 답변 형식: "○○ 관련 문의는 아래 담당자에게 연락해 주세요.\n- 홍길동 주임 (내선: 1234)"
+    [일반 인원 조회 — '몇 명','전체','현황','팀원' 포함 시]
+    표 형식: | 성명 | 직책 | 담당공정 | 내선 |
+    전화번호 0이면 "직통번호 없음 (내선 문의)"
+    [업무 영역 매핑]
+    국내/내수 → 담당공정에 "내수" | 수출/해외 → "수출" | 컨베어/크롤러 → "컨베어" 또는 "크롤러"
+    중부 → "중부" | 베트남 → "베트남" | 지입기사 → 부산공장/중부물류센터 기사
+12. 지입기사 납품 동선: '지입기사','납품 동선','노선','동선' 포함 질문 →
+    월~금 행이 모두 있는 기사 = 주5일 매일 운행 (특정 요일만 운행이라고 절대 말하지 마세요)
+    기사별로 요일별 납품 동선 표로 정리: | 요일 | 납품 동선 |
+13. 자재코드(7자리 숫자) 단독 질문 →
+    ① 자재 종류 자동 식별 ② 자재내역·자재그룹·중량 등 기본정보 제시
+    ③ 추가 키워드('중량','배차','직경') 있으면 해당 계산도 수행
+14. 전동수출 파렛트 CBM: 파렛트 1개 = 1.1m × 1.1m × 2.2m = 2.662 CBM, N파렛트 = 2.662 × N
+    내수용 PLT = 전동내수 공정 파렛트, 수출용 PLT = 전동수출 공정 파렛트
+    PLT/박스 리스트 질문: 해당 공정의 모든 규격을 빠짐없이 표로 제시
+    "내수용"="전동내수", "수출용"="전동수출"로 매핑하여 조회
+15. 국내 출고 운송방식: 부산시내 150kg/경남권 300kg/장거리 800kg 기준으로 화물·택배 vs 직송 판단
+16. 박스 적재: 600박스=1PLT당 8박스, 650박스=20박스, 1090박스=4박스
+17. 수출 컨테이너: 혼합 조합(40ft+20ft)도 제시, 잔여 공간 최소 조합 추천"""
+
+# ── 도메인별 추가 규칙 (V4 단일 프롬프트에 추가로 domain별 세부 지침만 남김) ──
+_DOMAIN_RULES = {
+
+    "conveyor": """
+[컨베어벨트 전용 규칙]
+1. 직경 계산 순서:
+   ① 자재코드로 상고무두께·하고무두께·PLY·코팅후포두께 확인
+   ② 포의 총두께 = (상고무두께 + 하고무두께) + (PLY × 코팅후포두께 - 0.2)
+   ③ 롤 직경(m) = √(포의 총두께 ÷ 1000 × 4 × 길이(M) ÷ 3.142 + 0.09)
+   ④ 길이 미입력 시 ①②만 계산 후 "컨베어벨트 길이(M)를 알려주세요" 요청
+   ⑤ 최종 답변: 롤 직경(m) + mm 단위 환산값 함께 제시
+2. 공백 셀 처리: 같은 포규격 패턴을 참고해 계산
+3. 자재내역 해석: ME NN-200 800X3X6.0X2.0 → 폭800mm PLY3 상고무6.0mm 하고무2.0mm
+4. 표 활용: 계산 과정은 단계별로, 결과는 표로 정리
+5. 컨베어벨트 배차 질문 (ROLL수 + 중량 제시 시):
+   ① 총중량(ton) 기준으로 [차량 데이터]의 최대중량(ton) 범위와 비교
+   ② 총중량이 차량 1대 최대중량 이하 → 해당 차량 1대 추천
+   ③ 초과 시 분할 배차 계산: 몇 대 필요한지 올림 계산
+   ④ 결과 표: | 총중량 | 추천차량 | 필요대수 | 비고 |
+   ⑤ 로브이(Low-bed)는 높이 2.6m 이상 제품에만 적용""",
+
+    "crawler": """
+[크롤러 러버트랙 전용 규칙]
+1. 배차 계산 순서:
+   ① 자재코드로 1PC당중량·1파렛트최대적재수 확인
+   ② 필요파렛트수 = 총수량 ÷ 1파렛트최대적재수 (소수점 올림)
+   ③ 파렛트사이즈(L×W)와 [차량 데이터] 적재함 폭·길이 비교
+   ④ 조건 충족하는 가장 작은 차량 추천
+2. 결과 표: | 자재코드 | 수량 | 1PC중량 | 총중량 | 필요PLT | 추천차량 |
+3. 자재코드 해석: RT550X60LX90.0P_A5RD → RT(러버트랙) 550(폭) 60(링크수) 90(피치mm)""",
+
+    "sidewall": """
+[주름혔벨트(사이드월) 전용 규칙]
+1. 우든박스 사이즈는 [주름혹벨트 우든박스 사이즈 데이터] 시트 참조
+2. 자재코드로 자재내역·수량(M)·우든박스 규격(W×L×H) 확인 후 제시
+3. '수량(M)' = 주문 길이(M) 기준값. 동일 자재코드에 규격이 여러 개면 수량(M)별로 모두 제시
+4. 총중량 계산: (수량_M × 순중량_KG) + 우든박스_중량_KG
+5. 결과 표: | 수량(M) | 우든박스 규격(W×L×H) | 우든박스 중량 추정 | 총중량 예상 |""",
+
+    "export": """
+[수출 포장량 전용 규칙]
+1. 박스 종류별 1파렛트당 적재수량:
+   600박스=8개/PLT, 650박스=20개/PLT, 1090박스=4개/PLT
+2. 파렛트 규격:
+   600박스: 1200×800×730mm (패키징: 1200×800×1460mm)
+   650박스: 1100×1100×2200mm
+   1090박스: 1100×1100×1110mm (패키징: 1100×1100×2220mm)
+3. CBM 계산: 파렛트 1개 = 2.662 CBM
+4. 컨테이너 선택: 20ft=최대10PLT, 40ft=최대20PLT, 혼합 조합도 제시""",
+
+    "domestic": """
+[국내 운송방식 전용 규칙]
+1. 자재코드로 1PC당 중량 확인 → 총 중량 계산
+2. 도착지 구간별 기준:
+   부산시내: 150kg 이하 화물/택배, 초과 직송
+   경남권(녹산·대저·명지): 300kg 이하 화물/택배, 초과 직송
+   장거리(서울·광주·대구 등): 800kg 이하 화물/택배, 초과 직송
+3. 웹 검색 절대 금지""",
+
+    "driver_route": """
+[지입기사 납품 동선 전용 규칙]
+1. 월~금 행이 모두 있는 기사 = 주5일 매일 운행 ("특정 요일만"이라고 절대 말하지 마세요)
+2. 요일별 도착지가 다른 것 = 그날의 납품 코스(동선)가 다름
+3. 모든 기사(부산공장 + 중부물류센터) 빠짐없이 포함
+4. 기사별 요일별 납품 동선 표: | 요일 | 납품 동선 |
+5. 이번 주 운행 기사 판별: 격주 앵커(2026-05-25 = B주 = 이용구) 기준""",
+
+    "personnel": """
+[담당자 조회 전용 규칙]
+1. 인원 수 질문("몇 명", "총 몇 명", "인원은"):
+   → 데이터에서 직접 세어 "물류팀 총 ○명입니다" 형식으로 답변
+   → 리스트를 그대로 나열하지 말고 숫자로 직접 답변
+   → 세부 구성도 요청 시: "사무직 ○명, 현장직 ○명, 지입기사 ○명"
+2. 전체 현황 요청("현황", "명단", "알려줘"): 표 형식 | 성명 | 직책 | 담당공정 | 내선 |
+   전화번호 0이면 "직통번호 없음 (내선 문의)"
+3. 직책자 질문: 팀장·주임·기정만 출력 (사원·팀원·기사 제외)
+4. 클레임/문의처: 해당 공정 주임 1명 + 팀원 1명만, 그 외 절대 포함 금지
+   형식: "○○ 관련 문의는 아래 담당자에게 연락해 주세요.\n- 홍길동 주임 (내선: 1234)"
+5. 지입기사 질문: 이름·연락처·차량 종류 제시""",
+
+    "vehicle": """
+[차량 제원 전용 규칙]
+1. 차량 데이터 표 형식: | 차량톤수 | 최대중량(ton) | 적재함길이(m) | 적재함폭(m) |
+2. 특이사항: 높이 2.6m 이상 → 로브이(Low-bed) 선택, 윙바디는 2.4m 미만
+3. 최대중량 초과 적재 절대 금지""",
+
+    "operation_rule": """
+[운영 규칙 전용]
+1. Q&A 데이터에서 질문과 가장 유사한 답변을 그대로 제시
+2. 데이터에 없는 내용은 "물류팀 담당자에게 문의해 주세요"
+3. 시간·마감 관련: 구체적인 시각까지 정확히 전달
+4. 추가 안내 금지: 데이터에 없는 절차·주의사항을 임의로 덧붙이지 마세요""",
+
+    "general": """
+[일반 규칙]
+1. 여러 데이터에 걸친 정보는 하나로 통합해서 자연스럽게 설명
+2. 비교/목록 데이터는 Markdown 표로 정리
+3. 수량 질문: 데이터를 빠짐없이 세어 정확한 합계 제시
+4. 자재코드(7자리 숫자) 단독 입력: 자재 종류 자동 식별 후 기본정보 제시""",
+}
+
+_PROMPT_BASE = """{system_role}
+
+{domain_rules}
 
 [이전 대화]
 {conversation_context}
@@ -75,105 +324,25 @@ PROMPT_TEMPLATE = """당신은 DRB 물류 전문 AI 어시스턴트입니다.
 [질문]
 {input}
 
-[답변 작성 규칙]
-1. **출처 표기 금지**: "문서 1", "[문서 2]" 같은 내부 참조 번호를 절대 답변에 포함하지 마세요.
-2. **정보 통합**: 여러 데이터에 걸쳐 있는 정보는 하나로 합쳐서 자연스럽게 설명하세요.
-3. **계산 표현 방식**: 계산 과정은 반드시 아래 자연어 형식으로만 작성하세요. LaTeX 수식 문법(행렬, aligned 환경 등)을 절대 사용하지 마세요.
-   올바른 예시:
-   - 포의 총두께 = (4.8 + 2.4) + (3 × 1.15 - 0.2) = 7.2 + 3.25 = **10.45 mm**
-   - 롤 직경 = √(10.45 ÷ 1000 × 4 × 100 ÷ 3.142 + 0.09) = √1.42 ≈ **1.19 m (1190 mm)**
-4. **계산 질문**: '몇 박스', '산출', '계산' 키워드가 있으면 공식과 계산 과정을 단계별로 보여주세요.
-5. **수량 질문**: '몇 명', '몇 개', '전체' 등의 질문은 데이터를 빠짐없이 세어 정확한 합계를 제시하세요.
-6. **표 활용**: 비교/목록 데이터는 Markdown 표로 정리하세요.
-7. **없는 정보**: 참고 데이터에 없는 내용은 "해당 정보를 찾을 수 없습니다"라고 솔직하게 말하세요.
-8. **간결하고 명확하게**: 불필요한 서론 없이 핵심 답변부터 시작하세요.
-9. **배차 계산 절차**: '몇 톤', '배차', '차량'이 포함된 질문은 반드시 아래 순서로 답변하세요.
-   ① 자재코드로 1파렛트당 최대 적재 수량(PC) 확인
-   ② 총 수량 ÷ 1파렛트당 수량 = 필요 파렛트 수 계산
-   ③ 파렛트 사이즈(가로×세로)와 차량 적재함 폭·길이를 비교
-   ④ 조건을 충족하는 가장 작은 차량 추천 (차량 데이터 참고)
-10. **컨베어벨트 직경 계산 절차**: '직경', '롤 직경', 'Roll Dia' 관련 질문은 아래 순서로 답변하세요.
-    ① 자재코드로 상고무두께, 하고무두께, 심체수(PLY), 코팅후 포두께 값 확인
-    ② 포의 총두께 = (상고무두께 + 하고무두께) + (PLY × 코팅후 포두께 - 0.2)  ← 자연어로 숫자 대입해서 계산
-    ③ 롤 직경(m) = √(포의 총두께 ÷ 1000 × 4 × 컨베어벨트 길이(M) ÷ 3.142 + 0.09)
-    ④ 컨베어벨트 길이(M)가 질문에 없으면 계산 과정 ①②를 먼저 보여주고,
-       "롤 직경 계산을 완성하려면 컨베어벨트 길이(M)를 알려주세요." 라고 요청하세요.
-    ⑤ 길이가 주어진 경우 최종 롤 직경(m)과 mm 단위 환산값을 함께 제시하세요.
-    
-11. **담당자/인원 조회 규칙**: '담당자', '담당', '누구', '연락처', '전화번호', '인원' 등의 키워드가 포함된 질문은
-    반드시 [물류팀 현황 데이터]를 우선 참조하여 아래 기준으로 필터링하세요.
-
-    [업무 영역 키워드 매핑]
-    - "국내", "내수", "내수출고", "내수담당"  → 담당 공정에 "내수" 포함된 인원
-    - "수출", "해외", "수출담당"             → 담당 공정에 "수출" 포함된 인원
-    - "입고", "입고담당"                     → 담당 공정에 "입고" 포함된 인원
-    - "원자재", "원자재 담당"               → 담당 공정에 "원자재" 포함된 인원
-    - "컨베어", "크롤러", "트랙"             → 담당 공정에 "컨베어" 또는 "크롤러" 포함된 인원
-    - "중부", "중부물류센터"                 → 담당 공정에 "중부" 포함된 인원
-    - "베트남"                              → 담당 공정에 "베트남" 포함된 인원
-    - "청도"                                → 담당 공정에 "청도" 포함된 인원
-    - "팀장", "총괄"                         → 구분이 팀장이거나 물류팀 총괄 인원
-    - "지입기사", "기사", "부산기사"          → 부산공장/중부물류센터 지입기사 인원
-
-    [답변 형식]
-    해당 인원을 표 형식으로 정리하세요:
-    | 성명 | 직책 | 담당 공정 | 연락처(내선) |
-    전화번호가 0인 경우 "직통번호 없음 (내선 문의)"으로 표시하세요.
-
-12. **지입기사 납품 동선/노선 규칙**: '지입기사', '납품 동선', '노선', '배달 경로', '기사 노선', '동선' 키워드가 포함된 질문은
-    반드시 [지입 차량(기사) 노선 데이터]를 참조하여 아래 규칙을 엄격히 따르세요.
-
-    [핵심 해석 규칙 - 반드시 준수]
-    - 데이터에 월~금요일 행이 모두 있는 기사 = 주 5일(월~금) 매일 운행하는 기사입니다. "특정 요일만 운행"이라고 절대 말하지 마세요.
-    - 요일별 도착지가 다른 것은 "그 날에만 운행"이 아니라 "그 날의 납품 코스(동선)가 다름"을 의미합니다.
-    - 데이터에 등록된 기사 전원(부산공장 기사 + 중부물류센터 기사)을 빠짐없이 모두 답변에 포함하세요. 누락하면 오답입니다.
-
-    [답변 형식]
-    기사별로 구분하여 요일별 납품 동선을 정리하세요:
-    ## 기사명 (소속)
-    | 요일 | 납품 동선 |
-    특정 요일을 질문한 경우 해당 요일 행만 추출해서 보여주세요.
-
-13. **자재코드 단독 질문 규칙**: 자재코드(7자리 숫자)만 입력하고 자재 종류를 명시하지 않은 질문에도
-    [참고 데이터]에 해당 코드 정보가 포함되어 있으면 반드시 아래 순서로 답변하세요.
-    ① 자재 종류 자동 식별 (컨베어벨트/주름혹벨트/크롤러 러버트랙 중 어느 시트에서 왔는지)
-    ② 자재내역(제품명), 자재그룹, 중량 등 기본 정보 먼저 제시
-    ③ 질문에 "중량", "적재", "배차", "직경" 등 추가 키워드가 있으면 해당 계산도 함께 수행
-    ④ 시트 구분 없이 코드만으로 모든 정보를 제공할 수 있음을 전제로 답변하세요.
-
-14. **전동 수출 파렛트 CBM 계산 규칙**: 'CBM', '파렛트 부피', '수출 CBM' 관련 질문은
-    반드시 아래 확정값을 사용하세요. 임의로 계산하거나 다른 수치를 사용하지 마세요.
-
-    [전동수출 파렛트 CBM 확정값 — 물류팀 운영 규칙]
-    - 파렛트 1개 규격: 가로 1.1m × 세로 1.1m × 높이 2.2m = **2.662 CBM**
-    - N파렛트 CBM = 2.662 × N
-    - 예시: 8파렛트 = 2.662 × 8 = **21.296 CBM**
-
-    [답변 형식]
-    | 항목 | 값 |
-    |------|-----|
-    | 파렛트 규격 | 1,100 × 1,100 × 2,200 mm |
-    | 파렛트 1개 CBM | 2.662 CBM |
-    | 파렛트 수량 | N PLT |
-    | 총 CBM | 2.662 × N = OO.OOO CBM |
-
-15. **국내 출고 운송 방식 판단 규칙**: '직송', '화물', '택배', '출고' 키워드 포함 시
-    자재코드로 1PC당 중량 확인 → 총 중량 계산 → 도착지 구간 기준 적용.
-    웹 검색 절대 사용 금지.
-    - 부산시내: 150kg 이하 화물/택배, 초과 직송
-    - 녹산·대저·명지·경남권: 300kg 이하 화물/택배, 초과 직송
-    - 서울·광주·대구 등 장거리: 800kg 이하 화물/택배, 초과 직송
-
-16. **박스 적재량 및 파렛트 사이즈 규칙**: '몇 박스', '1파렛트당', 'PLT당 적재' 관련 질문은
-    [물류팀 운영 규칙]을 1순위로 참조. [파렛트, 박스 데이터] 시트와 절대 혼용 금지.
-    - 600박스: 1PLT당 8박스 / 파렛트 1,200×800×730mm / 패키징 1,200×800×1,460mm
-    - 650박스: 1PLT당 20박스 / 파렛트 1,100×1,100×2,200mm
-    - 1090박스: 1PLT당 4박스 / 파렛트 1,100×1,100×1,110mm / 패키징 1,100×1,100×2,220mm
-
-17. **수출 컨테이너 선택 규칙**: '컨테이너', '20ft', '40ft' 관련 질문은
-    혼합 조합(40ft+20ft)도 함께 제시하고 잔여 공간 최소 조합을 최적 추천.
-    - 20ft: 최대 10PLT / 40ft: 최대 20PLT (파렛트 1.1×1.1m, 1단 적재)
 답변:"""
+
+# ── 도메인별 프롬프트 빌더 (캐시 없음 — 프롬프트 변경 즉시 반영) ──
+def get_domain_prompt(domain: str) -> ChatPromptTemplate:
+    """도메인별 ChatPromptTemplate 반환"""
+    rule = _DOMAIN_RULES.get(domain, _DOMAIN_RULES["general"])
+    template = (
+        _PROMPT_BASE
+        .replace("{system_role}", _PROMPT_SYSTEM)
+        .replace("{domain_rules}", rule)
+    )
+    return ChatPromptTemplate.from_template(template)
+
+# 기존 코드 호환용 (RAGChainWrapper 초기화 시 사용)
+PROMPT_TEMPLATE = (
+    _PROMPT_BASE
+    .replace("{system_role}", _PROMPT_SYSTEM)
+    .replace("{domain_rules}", _DOMAIN_RULES["general"])
+)
 
 class EmailNotifier:
     """부정 피드백 이메일 알림 시스템"""
@@ -424,85 +593,70 @@ class EmailNotifier:
         return html
 
 class OnPremiseGemmaLLM(LLM):
-    """온프레미스 Gemma LLM"""
+    """온프레미스 LLM (openai 호환 API)"""
     api_url: str = ONPREMISE_API_URL
-    model: str = ONPREMISE_MODEL
+    model:   str = ONPREMISE_MODEL
+    api_key: str = ONPREMISE_API_KEY
     timeout: int = ONPREMISE_TIMEOUT
     max_retries: int = 3
     temperature: float = 0.2
-    _last_call_ts: float = PrivateAttr(default=0.0)
+    _last_call_ts:    float = PrivateAttr(default=0.0)
     _rate_limit_delay: float = PrivateAttr(default=1.0)
-    
+
     @property
     def _identifying_params(self) -> Dict[str, Any]:
         return {"api_url": self.api_url, "model": self.model}
-    
+
     @property
     def _llm_type(self) -> str:
-        return "onpremise_gemma"
-    
+        return "onpremise_llm"
+
     def _enforce_rate_limit(self):
-        current_time = time.time()
-        time_since_last_call = current_time - self._last_call_ts
-        
-        if time_since_last_call < self._rate_limit_delay:
-            sleep_time = self._rate_limit_delay - time_since_last_call
-            time.sleep(sleep_time)
-        
+        elapsed = time.time() - self._last_call_ts
+        if elapsed < self._rate_limit_delay:
+            time.sleep(self._rate_limit_delay - elapsed)
         self._last_call_ts = time.time()
-    
+
+    def _get_client(self) -> openai.OpenAI:
+        return openai.OpenAI(
+            api_key=self.api_key or "dummy",  # 키 없을 때 dummy 허용
+            base_url=self.api_url,
+        )
+
     def _call(self, prompt: str, stop: Optional[List[str]] = None) -> str:
-        return self._call_with_max_tokens(prompt, max_tokens=2048)
+        return self._call_with_max_tokens(prompt, max_tokens=4096)
 
     def _call_with_max_tokens(self, prompt: str, max_tokens: int = 2048) -> str:
         self._enforce_rate_limit()
-        
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": self.temperature,
-            "stream": False,
-            "max_tokens": max_tokens
-        }
-        
+        client = self._get_client()
+
         for attempt in range(1, self.max_retries + 1):
             try:
-                response = requests.post(
-                    self.api_url,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=self.timeout
+                response = client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=self.temperature,
+                    max_tokens=max_tokens,
+                    top_p=1,
+                    timeout=self.timeout,
                 )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    if "message" in data and "content" in data["message"]:
-                        return data["message"]["content"]
-                    elif "content" in data:
-                        return data["content"]
-                    elif "choices" in data and len(data["choices"]) > 0:
-                        return data["choices"][0].get("message", {}).get("content", "")
-                    else:
-                        raise ValueError(f"Unexpected response format: {data}")
-                
-                elif response.status_code == 429:
-                    if attempt < self.max_retries:
-                        time.sleep(5 * attempt)
-                    else:
-                        raise RuntimeError("Rate limit exceeded")
+                content = response.choices[0].message.content
+                return content or ""
+
+            except openai.RateLimitError:
+                logger.warning(f"Rate limit (시도 {attempt})")
+                if attempt < self.max_retries:
+                    time.sleep(5 * attempt)
                 else:
-                    if attempt < self.max_retries:
-                        time.sleep(2 * attempt)
-                    else:
-                        raise RuntimeError(f"API failed: {response.text}")
-            
-            except requests.Timeout:
+                    raise RuntimeError("Rate limit exceeded")
+
+            except openai.APITimeoutError:
+                logger.warning(f"API timeout (시도 {attempt})")
                 if attempt < self.max_retries:
                     time.sleep(2 * attempt)
                 else:
                     raise RuntimeError(f"API timeout after {self.max_retries} retries")
-            
+
             except Exception as e:
                 logger.error(f"API 호출 오류 (시도 {attempt}): {e}")
                 if attempt < self.max_retries:
@@ -510,16 +664,45 @@ class OnPremiseGemmaLLM(LLM):
                 else:
                     raise
 
+        logger.error("_call_with_max_tokens: 모든 재시도 실패")
+        return ""
+
 
 class RAGChainWrapper:
     """RAG 체인 래퍼 (검색 최적화)"""
 
     # 시트명 → 도메인 매핑
+    # source값(시트명) → domain 매핑 (data_loader V5 기준)
     SHEET_TO_DOMAIN = {
-        "컨베어벨트 규격 데이터"         : "conveyor",
-        "주름혹벨트 우든박스 사이즈 데이터": "sidewall",   # 주름혹벨트 전용
-        "크롤러 러버트랙 규격 데이터"      : "crawler",
+        # source 값 (시트명) 기준
+        "컨베어벨트 규격 데이터"          : "conveyor",
+        "주름혹벨트 우든박스 사이즈 데이터" : "sidewall",
+        "크롤러 러버트랙 규격 데이터"       : "crawler",
+        # domain 값 직접 매핑 (V5에서 source 대신 domain이 저장된 경우)
+        "conveyor"   : "conveyor",
+        "sidewall"   : "sidewall",
+        "crawler"    : "crawler",
     }
+
+    def _sheet_to_domain(self, sheet_name: str) -> Optional[str]:
+        """시트명(source) 또는 domain값 → 도메인 반환"""
+        # 정확 일치 먼저
+        if sheet_name in self.SHEET_TO_DOMAIN:
+            return self.SHEET_TO_DOMAIN[sheet_name]
+        # 부분 포함
+        for key, domain in self.SHEET_TO_DOMAIN.items():
+            if key in sheet_name or sheet_name in key:
+                return domain
+        return None
+
+    def _domain_from_code(self, code: str) -> Optional[str]:
+        """코드만으로 도메인 판별 (매핑 캐시 사용)"""
+        val = self._code_sheet_map.get(str(code))
+        if not val:
+            return None
+        if val in ("conveyor", "sidewall", "crawler"):
+            return val
+        return self._sheet_to_domain(val)
 
     def __init__(self, vectorstore, llm, embeddings, qdrant_client):
         self.vectorstore = vectorstore
@@ -527,15 +710,14 @@ class RAGChainWrapper:
         self.embeddings = embeddings
         self.qdrant_client = qdrant_client
         self.prompt_template = ChatPromptTemplate.from_template(PROMPT_TEMPLATE)
-        # 코드 → 시트명 매핑 캐시 (시작 시 Qdrant에서 빌드)
         self._code_sheet_map: dict = {}
         self._build_code_sheet_map()
 
     def _build_code_sheet_map(self):
         """
         Qdrant logistics_data에서 material_code 페이로드를 읽어
-        {코드: sheet_name} 매핑 딕셔너리를 빌드.
-        코드만으로 자재 종류(시트) 자동 판별에 사용.
+        {코드: domain} 매핑 딕셔너리를 빌드.
+        data_loader V5: material_code/domain/source 최상위 키로 저장
         """
         try:
             offset = None
@@ -543,12 +725,6 @@ class RAGChainWrapper:
             while True:
                 result = self.qdrant_client.scroll(
                     collection_name=QDRANT_COLLECTION,
-                    scroll_filter=models.Filter(
-                        must=[models.FieldCondition(
-                            key="material_code",
-                            match=models.MatchAny(any=["*"])   # 존재하는 것만
-                        )]
-                    ) if False else None,   # 필터 없이 전체 스캔
                     limit=batch_size,
                     offset=offset,
                     with_payload=True,
@@ -556,10 +732,18 @@ class RAGChainWrapper:
                 )
                 points, next_offset = result
                 for point in points:
-                    code = point.payload.get("material_code") or \
-                           point.payload.get("metadata", {}).get("material_code")
-                    sheet = point.payload.get("sheet_name") or \
-                            point.payload.get("metadata", {}).get("sheet_name", "")
+                    p = point.payload
+                    code = p.get("material_code")
+                    if not code:
+                        code = p.get("metadata", {}).get("material_code")
+                    if not code:
+                        continue
+                    sheet = (
+                        p.get("source") or
+                        p.get("sheet_name") or
+                        p.get("metadata", {}).get("sheet_name") or
+                        p.get("domain", "")
+                    )
                     if code and sheet:
                         self._code_sheet_map[str(code)] = sheet
 
@@ -572,20 +756,6 @@ class RAGChainWrapper:
             logger.warning(f"코드-시트 매핑 빌드 실패 (fallback 사용): {e}")
             self._code_sheet_map = {}
 
-    def _sheet_to_domain(self, sheet_name: str) -> Optional[str]:
-        """시트명 → 도메인 변환"""
-        for key, domain in self.SHEET_TO_DOMAIN.items():
-            if key in sheet_name:
-                return domain
-        return None
-
-    def _domain_from_code(self, code: str) -> Optional[str]:
-        """코드만으로 도메인 판별 (매핑 캐시 사용)"""
-        sheet = self._code_sheet_map.get(str(code))
-        if sheet:
-            return self._sheet_to_domain(sheet)
-        return None
-    
     @lru_cache(maxsize=100)
     def extract_material_code(self, query: str) -> Optional[str]:
         """자재코드(7자리) 추출 - 한글 앞뒤 경계도 처리"""
@@ -641,10 +811,12 @@ class RAGChainWrapper:
         matched_docs = []
         for point in points_found:
             payload = point.payload
+            # text 키 우선 (data_loader V5), 없으면 page_content (구버전 호환)
+            content = payload.get('text') or payload.get('page_content', '')
             matched_docs.append({
                 'id'      : point.id,
-                'content' : payload.get('page_content', ''),
-                'metadata': payload.get('metadata', {}),
+                'content' : content,
+                'metadata': {k: v for k, v in payload.items() if k != 'text'},
                 'score'   : 1.0
             })
 
@@ -656,19 +828,104 @@ class RAGChainWrapper:
         질문 + 검색된 문서 내용을 기반으로 도메인 판별.
         자재코드가 있으면 코드-시트 매핑으로 우선 판별 (가장 정확).
         단, 운송방식 키워드가 함께 있으면 domestic 우선 적용.
-        반환값: 'conveyor' | 'sidewall' | 'crawler' | 'export' | 'domestic' | 'driver_route' | 'general'
+        반환값: 'conveyor' | 'sidewall' | 'crawler' | 'export' | 'domestic' | 'driver_route' | 'personnel' | 'operation_rule' | 'vehicle' | 'general'
         """
         combined = query + " " + keyword_doc_content
 
-        # ── 0순위: 국내 운송방식 키워드 — 자재코드 유무와 무관하게 최우선 ──
-        # "출고", "운송방식", "직송", "화물", "택배" 가 있으면 물류팀 운영 규칙이 필요
-        domestic_kw = ["운송방식", "직송", "화물", "택배", "출고", "국내 출고", "운송 방식",
-                       "어떤 운송", "운반 방법", "배송 방법", "배송방법", "운반방법"]
+        # ── 0순위: 담당자/인원 조회 — 자재 키워드와 혼재해도 personnel 우선 ──
+        # "컨베어,크로라 담당이 누구야" 같은 질문을 conveyor로 잘못 분류 방지
+        # "담당", "담당자", "누구" 등 + 인물/조직 관련 키워드가 핵심
+        personnel_strong_kw = [
+            "담당자", "담당이", "담당은", "담당 이", "누가 담당",
+            "누구야", "누구예요", "누구죠", "누구인가요", "누구에게",
+            "누구한테", "연락처", "전화번호", "내선번호",
+            "직책자", "책임자", "관리자", "몇 명이야", "몇 명인가요",
+            "팀원이", "팀장이", "현황이", "인원이",
+            "담당이라는게", "담당이란게", "담당 맞나요", "담당인가요",
+        ]
+        if any(k in query for k in personnel_strong_kw):
+            logger.info(f"담당자 강한 키워드 감지 → 도메인: personnel")
+            return "personnel"
+
+        # ── 0.5순위: 운영규칙 전용 키워드 (domestic보다 먼저 체크) ──────
+        # '출고','화물','택배' 등이 포함된 운영규칙 질문이 domestic으로
+        # 잘못 분류되는 것을 방지
+        operation_rule_kw = [
+            # 주문/마감
+            "주문 마감", "마감 시간", "마감시간", "당일 출고", "당일출고",
+            "출고 변경", "출고 취소", "주말 출고", "선입선출",
+            # 운송/배차 규칙
+            "운송 현황", "운송현황", "도착시간 확인", "추가 운임", "추가운임",
+            "배차 단가", "배차단가", "배차 신청", "배차신청", "배차 방법",
+            "지입기사", "추가 운행", "추가운행", "허용 중량", "과적",
+            "제주도", "긴급 발주", "긴급발주", "운임 기준", "운임기준",
+            # 샘플/수령/포장
+            "수령 가능", "샘플 수령", "샘플은 어떻게", "샘플 받", "벨트 샘플",
+            "바코드 기입", "QR 기입", "박스 외면", "박스 규격",
+            "포장 분단", "분단 가능", "철복스",
+            "분단이 가능", "분단 되나", "분단해줘", "지금 분단", "벨트 분단", "분단할 수",
+            # 사고/문의 처리
+            "훼손", "미도착", "오배송", "반품", "검토 요청", "아웃바운드",
+            "불량 발생", "오(미)배송",
+            # 지게차
+            "지게차 요청", "지게차 작업", "지게차 톤",
+            "지게차를 요청", "지게차 이용", "지게차 사용", "지게차 신청", "지게차가", "지게차는",
+            # 수출
+            "선적 서류", "수출 컨테이너", "위험물", "항공편",
+            # 기타 운영
+            "운영 규칙", "운영규칙", "원자재 창고", "보관 온도",
+            "도로 교통법", "운송 제한", "DCM", "그룹웨어",
+        ]
+        if any(k in query for k in operation_rule_kw):
+            logger.info(f"운영규칙 키워드 감지 → 도메인: operation_rule")
+            return "operation_rule"
+
+        # ── 0.5순위: 파렛트·박스 포장재 키워드 ──────────────────────────
+        pallet_kw = [
+            "파렛트", "PLT", "plt", "팔레트", "pallet",
+            "포장재 규격", "포장재 리스트", "포장재 종류",
+            "내수용 PLT", "수출용 PLT", "내수 PLT", "수출 PLT",
+            "박스 규격", "박스 리스트", "BOX 규격",
+            "PE포", "받침목",
+        ]
+        if any(k in query for k in pallet_kw):
+            logger.info(f"파렛트/박스 키워드 감지 → 도메인: pallet_box")
+            return "pallet_box"
+
+        # ── 0.6순위: 주름혹벨트(사이드월) 우든박스 키워드 ───────────────
+        sidewall_kw = [
+            "주름혹벨트", "사이드월", "sidewall", "우든박스", "우든 박스",
+            "포장박스사이즈", "박스사이즈", "박스 사이즈", "포장 박스",
+            "주문길이", "주문 길이", "박스규격", "박스 규격",
+        ]
+        if any(k in query for k in sidewall_kw):
+            logger.info(f"주름혹벨트 키워드 감지 → 도메인: sidewall")
+            return "sidewall"
+
+        # ── 0.7순위: 차량 제원 전용 키워드 ────────────────────────────
+        vehicle_kw = [
+            "차량 제원", "차량제원", "적재함 크기", "적재함 길이", "적재함 폭",
+            "차량 종류", "차량종류", "톤수별 차량", "차량 규격", "차량규격",
+            "몇 톤 차량", "차량 몇 톤", "차량 정보", "차량 스펙",
+        ]
+        if any(k in query for k in vehicle_kw):
+            logger.info(f"차량 제원 키워드 감지 → 도메인: vehicle")
+            return "vehicle"
+
+        # ── 1순위: 국내 운송방식 키워드 ─────────────────────────────────
+        domestic_kw = [
+            "운송방식", "국내 출고", "운송 방식", "어떤 운송",
+            "운반 방법", "배송 방법", "배송방법", "운반방법",
+            # 중량+운송/배차 조합 (지역명 불필요)
+            "kg 운송", "ton 운송", "톤 운송", "kg 배차", "ton 배차",
+            "최적의 배차", "최적 배차", "배차를 알려", "배차 알려줘",
+            "어떻게 보내", "어떤 차량으로", "직송이야", "화물이야", "택배야",
+        ]
         if any(k in query for k in domestic_kw):
             logger.info(f"운송방식 키워드 감지 → 도메인: domestic")
             return "domestic"
 
-        # ── 1순위: 코드-시트 매핑으로 정확한 판별 ──────────────────────
+        # ── 2순위: 코드-시트 매핑으로 정확한 판별 ──────────────────────
         code = self.extract_material_code(query)
         if code:
             domain_from_code = self._domain_from_code(code)
@@ -676,42 +933,77 @@ class RAGChainWrapper:
                 logger.info(f"코드 {code} → 도메인: {domain_from_code} (매핑 캐시)")
                 return domain_from_code
 
-        # ── 2순위: 키워드 기반 판별 ──────────────────────────────────────
+        # ── 3순위: 키워드 기반 판별 ──────────────────────────────────────
+
+        # [문제1 수정] 자재코드가 있는데 도메인 캐시 미스인 경우
+        # "1093605 자재 포장 합한 총 중량" → 자재코드 있음 → sidewall 로 가야 함
+        # 코드 캐시 미스 시 키워드로 보조 판별
+        if code:
+            sidewall_code_kw = ["포장", "총 중량", "총중량", "우든", "박스 무게", "전체 중량"]
+            if any(k in query for k in sidewall_code_kw):
+                return "sidewall"
 
         # 지입기사 납품 동선 도메인
-        driver_kw = ["지입기사", "납품 동선", "동선", "기사 노선", "납품 노선", "배달 경로",
-                     "김병일", "김영철", "이용구", "심효섭",
-                     "부산기사", "중부기사", "서울기사",
-                     "지입 기사", "납품경로", "납품코스"]
-        if any(k in combined for k in driver_kw):
+        # [문제3 수정] 특정 기사 이름이 있으면 driver_route, 이름 없이 "기사" 단독은 personnel
+        cost_kw = ["단가", "비용", "차이", "가격", "운임", "요금", "금액"]
+        driver_kw = [
+            "지입기사", "납품 동선", "동선", "기사 노선", "납품 노선", "배달 경로",
+            "김병일", "김영철", "이용구", "심효섭",
+            "부산기사", "중부기사", "서울기사",
+            "지입 기사", "납품경로", "납품코스", "노선 알려",
+        ]
+        if any(k in combined for k in driver_kw) and not any(k in combined for k in cost_kw):
             return "driver_route"
 
-        # 주름혹벨트 도메인 (컨베어보다 먼저 체크 - ME SW 패턴)
+        # 주름혹벨트 도메인 (컨베어보다 먼저 체크)
         sidewall_kw = ["주름혹", "sidewall", "SW ", "ME SW", "우든박스", "우드박스"]
         if any(k in combined for k in sidewall_kw):
             return "sidewall"
 
         # 컨베어벨트 도메인
-        conveyor_kw = ["컨베어", "컨베이어", "직경", "롤", "NN", "EP", "포규격", "심체", "컨베어벨트"]
+        # [문제2 수정] "컨베어 담당" 질문이 conveyor로 빠지지 않도록
+        # → 위에서 personnel_strong_kw로 먼저 걸러지므로 여기선 기술 질문만 해당
+        conveyor_kw = ["컨베어벨트", "컨베이어", "직경", "롤 직경", "포규격", "심체수",
+                       "상고무", "하고무", "코팅후포두께", "EP포", "NN포",
+                       "컨베어 규격", "컨베어 자재"]
         if any(k in combined for k in conveyor_kw):
+            return "conveyor"
+        # 컨베어 단독 사용 (담당/인원 키워드 없을 때만)
+        if "컨베어" in combined and not any(k in combined for k in ["담당", "누구", "연락", "직책", "책임"]):
             return "conveyor"
 
         # 크롤러/러버트랙 도메인
-        crawler_kw = ["크롤러", "러버트랙", "RT", "트랙", "배차", "몇 톤", "파렛트", "Rubber Track"]
+        # [문제2 수정] "크롤러 담당" 질문이 crawler로 빠지지 않도록
+        # → 위에서 personnel_strong_kw로 먼저 걸러지므로 여기선 기술 질문만 해당
+        crawler_kw = ["러버트랙", "Rubber Track", "크롤러 배차", "크롤러 규격",
+                      "크롤러 중량", "크롤러 자재", "RT 자재", "크롤러 러버"]
         if any(k in combined for k in crawler_kw):
             return "crawler"
+        # 크롤러 단독 사용 (담당/인원 키워드 없을 때만)
+        if "크롤러" in combined and not any(k in combined for k in ["담당", "누구", "연락", "직책", "책임"]):
+            return "crawler"
 
-        # 수출 포장 도메인 (CBM/파렛트 계산 포함)
-        export_kw = ["박스", "포장량", "컨테이너", "B01", "B02", "N18", "N19", "마대", "우든",
-                     "CBM", "cbm", "Pallet", "파렛트", "전동수출", "수출 파렛트"]
+        # 수출 포장 도메인
+        export_kw = ["포장량", "컨테이너", "B01", "B02", "N18", "N19", "마대",
+                     "CBM", "cbm", "수출 파렛트", "전동수출", "수출 박스"]
         if any(k in combined for k in export_kw):
             return "export"
+
+        # 인원/담당자 도메인 (약한 키워드)
+        personnel_kw = [
+            "인원", "담당", "누구", "연락처", "전화번호", "내선",
+            "팀원", "팀장", "직책", "관리자",
+            "지게차", "외주업체", "물류팀 현황", "물류팀 인원", "몇 명",
+        ]
+        if any(k in combined for k in personnel_kw):
+            return "personnel"
 
         return "general"
 
     def fetch_whole_docs(self, sheet_names: list, limit: int = 5):
-        """WHOLE/QA 전략으로 저장된 특정 시트 문서를 페이로드 필터로 가져옴
-        - 최상위 sheet_name 필터 우선, 없으면 metadata.sheet_name 시도 (Qdrant 버전 호환)
+        """
+        data_loader V5 기준: source 키로 저장된 문서를 페이로드 필터로 가져옴.
+        저장 구조: payload = {**meta, "text": ...}  (text/domain/source 최상위)
         """
         from langchain_core.documents import Document
         docs = []
@@ -719,13 +1011,13 @@ class RAGChainWrapper:
             for sheet in sheet_names:
                 points_found = []
 
-                # 1차: 최상위 sheet_name 필터 (data_loader v2 이후)
+                # 1차: source 키 필터 (data_loader V5 기준)
                 try:
                     result = self.qdrant_client.scroll(
                         collection_name=QDRANT_COLLECTION,
                         scroll_filter=Filter(
                             must=[FieldCondition(
-                                key="sheet_name",
+                                key="source",
                                 match=MatchValue(value=sheet)
                             )]
                         ),
@@ -737,14 +1029,49 @@ class RAGChainWrapper:
                 except Exception:
                     pass
 
-                # 2차: metadata.sheet_name 필터 (구버전 인덱스 호환)
+                # 2차: domain 키 필터 (source 매칭 실패 시)
+                if not points_found:
+                    # source 시트명 → domain 매핑
+                    _SHEET_TO_DOMAIN = {
+                        "컨베어벨트 직경 산출 수식":          "conveyor_formula",
+                        "주름혹벨트 우든박스 사이즈 데이터":   "sidewall",
+                        "차량 데이터":                        "vehicle",
+                        "물류팀 운영 규칙":                   "operation_rule",
+                        "용차 차량 노선 데이터":              "route",
+                        "지입 차량(기사) 노선 데이터":        "driver_route",
+                        "포장량 산출 데이터":                 "packaging",
+                        "수출 포장량 산출 수식":              "export_rule",
+                        "물류팀 현황 데이터":                 "personnel",
+                        "크롤러 러버트랙 규격 데이터":        "crawler",
+                        "파렛트, 박스 데이터":               "pallet_box",
+                    }
+                    domain_val = _SHEET_TO_DOMAIN.get(sheet)
+                    if domain_val:
+                        try:
+                            result = self.qdrant_client.scroll(
+                                collection_name=QDRANT_COLLECTION,
+                                scroll_filter=Filter(
+                                    must=[FieldCondition(
+                                        key="domain",
+                                        match=MatchValue(value=domain_val)
+                                    )]
+                                ),
+                                limit=limit,
+                                with_payload=True,
+                                with_vectors=False
+                            )
+                            points_found = result[0]
+                        except Exception:
+                            pass
+
+                # 3차: 구버전 sheet_name 필터 (이전 data_loader 호환)
                 if not points_found:
                     try:
                         result = self.qdrant_client.scroll(
                             collection_name=QDRANT_COLLECTION,
                             scroll_filter=Filter(
                                 must=[FieldCondition(
-                                    key="metadata.sheet_name",
+                                    key="sheet_name",
                                     match=MatchValue(value=sheet)
                                 )]
                             ),
@@ -758,10 +1085,10 @@ class RAGChainWrapper:
 
                 for point in points_found:
                     payload = point.payload
-                    doc = Document(
-                        page_content=payload.get('page_content', ''),
-                        metadata=payload.get('metadata', {})
-                    )
+                    # text 키 우선, 없으면 page_content (구버전 호환)
+                    text = payload.get('text') or payload.get('page_content', '')
+                    meta = {k: v for k, v in payload.items() if k != 'text'}
+                    doc = Document(page_content=text, metadata=meta)
                     if doc.page_content:
                         docs.append((doc, 0.9))
 
@@ -771,16 +1098,64 @@ class RAGChainWrapper:
             logger.warning(f"WHOLE 문서 보완 실패: {e}")
         return docs
 
+    def fetch_driver_docs_by_group(self, target_date=None) -> list:
+        """
+        driver_route 전체 문서를 가져옴 (공통 + A + B 모두).
+        격주 필터링은 _format_driver_route_answer 내부에서 수행.
+        → 이번 주 미운행 기사를 명시적으로 질문해도 '다음 주 노선 미리보기'로 답변 가능.
+        """
+        from langchain_core.documents import Document
+        wg = get_week_group(target_date)
+        docs = []
+        try:
+            # 공통 + A + B 전체 조회
+            result = self.qdrant_client.scroll(
+                collection_name=QDRANT_COLLECTION,
+                scroll_filter=Filter(
+                    must=[FieldCondition(
+                        key="domain",
+                        match=MatchValue(value="driver_route")
+                    )]
+                ),
+                limit=100,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in result[0]:
+                payload = point.payload
+                text = payload.get("text", payload.get("page_content", ""))
+                if text:
+                    doc = Document(
+                        page_content=text,
+                        metadata={k: v for k, v in payload.items() if k != "text"},
+                    )
+                    docs.append((doc, 0.9))
+            logger.info(f"driver_route 전체 조회(이번주={wg}): {len(docs)}건")
+        except Exception as e:
+            logger.warning(f"driver_route domain 필터 실패 → source fallback: {e}")
+            docs = self.fetch_whole_docs(["지입 차량(기사) 노선 데이터"], limit=100)
+
+        if not docs:
+            logger.warning("driver_route 조회 0건 → 재적재 필요")
+
+        return docs
+
     # 도메인별 보완 시트 매핑
     DOMAIN_SUPPLEMENT_SHEETS = {
-        "conveyor"     : ["컨베어벨트 직경 산출 수식"],
-        "sidewall"     : ["주름혹벨트 우든박스 사이즈 데이터"],
-        "crawler"      : ["차량 데이터"],
-        "domestic"     : ["물류팀 운영 규칙", "용차 차량 노선 데이터", "차량 데이터"],
-        # export·general 모두 물류팀 운영 규칙 포함 — CBM/컨테이너/운임 계산 데이터 확보
-        "export"       : ["수출 포장량 산출 수식", "포장량 산출 데이터", "물류팀 운영 규칙"],
-        "driver_route" : ["지입 차량(기사) 노선 데이터"],
-        "general"      : ["차량 데이터", "물류팀 운영 규칙"],
+        # Fix: conveyor에 차량 데이터 추가 → 컨베어 배차 질문 답변 가능
+        "conveyor"      : ["컨베어벨트 직경 산출 수식", "차량 데이터", "물류팀 운영 규칙"],
+        "sidewall"      : ["주름혹벨트 우든박스 사이즈 데이터"],
+        "crawler"       : ["차량 데이터"],
+        "domestic"      : ["물류팀 운영 규칙", "용차 차량 노선 데이터", "차량 데이터"],
+        "export"        : ["수출 포장량 산출 수식", "포장량 산출 데이터", "물류팀 운영 규칙"],
+        "driver_route"  : ["지입 차량(기사) 노선 데이터"],
+        "personnel"     : ["물류팀 현황 데이터"],
+        "operation_rule": ["물류팀 운영 규칙"],
+        # Fix: vehicle 도메인 신규 추가 → 차량 제원 질문 전용
+        "vehicle"       : ["차량 데이터"],
+        "pallet_box"    : ["파렛트, 박스 데이터"],  # Fix: PLT/박스 도메인 추가
+        # general: 운영규칙 먼저 → 차량 데이터 순
+        "general"       : ["물류팀 운영 규칙", "차량 데이터", "물류팀 현황 데이터"],
     }
 
     def hybrid_search(self, query: str, k: int = 50):
@@ -841,10 +1216,35 @@ class RAGChainWrapper:
                 # 결과가 없으면 아래 벡터 검색으로 fallback
 
         try:
-            vector_results = self.vectorstore.similarity_search_with_score(query, k=50)
+            vector_results = self.vectorstore.similarity_search_with_score(query, k=50)  # Fix: V4 동일 50개
+
+            # ── 도메인별 유사도 임계값 차등 적용 ─────────────────────────────
+            _domain_now = self._detect_domain(query)
+            SCORE_THRESHOLD = {
+                "conveyor"       : 0.20,  # Fix: V4(0.15) 수준으로 완화
+                "crawler"        : 0.20,
+                "sidewall"       : 0.20,
+                "domestic"       : 0.20,
+                "export"         : 0.20,
+                "personnel"      : 0.15,
+                "operation_rule" : 0.15,
+                "vehicle"        : 0.15,
+                "pallet_box"     : 0.15,  # Fix: 파렛트/박스 도메인
+                "driver_route"   : 0.15,
+                "general"        : 0.15,
+            }
+            _threshold = SCORE_THRESHOLD.get(_domain_now, 0.35)
 
             if len(vector_results) > 3:
-                filtered_results = [(doc, score) for doc, score in vector_results if score >= 0.15]
+                filtered_results = [
+                    (doc, score) for doc, score in vector_results if score >= _threshold
+                ]
+                if len(filtered_results) < 2:
+                    filtered_results = [
+                        (doc, score) for doc, score in vector_results if score >= 0.10
+                    ]
+                    logger.info(f"임계값 완화: {_threshold} → 0.10 (결과 부족)")
+                logger.info(f"도메인={_domain_now} 임계값={_threshold} 결과={len(filtered_results)}개")
             else:
                 filtered_results = vector_results
 
@@ -869,9 +1269,100 @@ class RAGChainWrapper:
                             filtered_results.append((doc, score))
                     logger.info(f"코드 벡터 fallback 보완: 도메인={domain}, +{len(extra)}개")
 
-            # 지입기사 납품 동선 질문이면 노선 전체 문서를 강제 보완
+            # general 도메인 중 배차/차량 질문 → 차량 데이터 외 타도메인 문서 제거
+            _vehicle_query_kw = ["배차 할", "배차할", "배차 가능", "차량 목록", "차량 종류",
+                                  "차량 리스트", "어떤 차량", "차량에는 어떤", "차량 있어"]
+            if domain == "general" and any(k in query for k in _vehicle_query_kw):
+                veh_docs = self.fetch_whole_docs(["차량 데이터"], limit=20)
+                filtered_results = [
+                    (doc, score) for doc, score in filtered_results
+                    if doc.metadata.get("domain") == "vehicle"
+                    or doc.metadata.get("source") == "차량 데이터"
+                ]
+                existing = {doc.page_content[:50] for doc, _ in filtered_results}
+                for doc, score in veh_docs:
+                    if doc.page_content[:50] not in existing:
+                        filtered_results.append((doc, score))
+                logger.info(f"general 차량목록 질문 → 차량 데이터만 {len(filtered_results)}개")
+
+            # general 도메인 → 운영 규칙 강제 보완 (샘플/주문/배송 등 일반 업무 질문)
+            if domain in ("general", "operation_rule"):
+                op_docs = self.fetch_whole_docs(["물류팀 운영 규칙"], limit=60)  # summary 1개 + Q&A 51개
+                if op_docs:
+                    # summary 청크를 맨 앞으로 정렬 → context 앞부분에 전체 Q&A 요약 배치
+                    summary_first = sorted(op_docs, key=lambda x: 0 if x[0].metadata.get("type") == "summary" else 1)
+                    existing = {doc.page_content[:50] for doc, _ in filtered_results}
+                    added = 0
+                    for doc, score in summary_first:
+                        if doc.page_content[:50] not in existing:
+                            filtered_results.insert(0, (doc, score))  # 앞에 삽입
+                            existing.add(doc.page_content[:50])
+                            added += 1
+                    logger.info(f"general/operation_rule 운영규칙 보완: +{added}개")
+
+            # pallet_box 도메인 → 파렛트/박스 데이터 전체 강제 보완
+            if domain == "pallet_box":
+                plt_docs = self.fetch_whole_docs(["파렛트, 박스 데이터"], limit=20)
+                if plt_docs:
+                    filtered_results = [
+                        (doc, score) for doc, score in filtered_results
+                        if doc.metadata.get("domain") == "pallet_box"
+                        or doc.metadata.get("source") == "파렛트, 박스 데이터"
+                    ]
+                    existing = {doc.page_content[:50] for doc, _ in filtered_results}
+                    for doc, score in plt_docs:
+                        if doc.page_content[:50] not in existing:
+                            filtered_results.append((doc, score))
+                    logger.info(f"pallet_box 강제 보완: {len(filtered_results)}개")
+
+            # vehicle 도메인 → 차량 데이터만 강제 보완, 타도메인 혼입 제거
+            if domain == "vehicle":
+                veh_docs = self.fetch_whole_docs(["차량 데이터"], limit=20)
+                if veh_docs:
+                    # 벡터 결과에서 vehicle 이외 도메인 문서 제거 → 조합 오답 방지
+                    filtered_results = [
+                        (doc, score) for doc, score in filtered_results
+                        if doc.metadata.get("domain") == "vehicle"
+                        or doc.metadata.get("source") == "차량 데이터"
+                    ]
+                    existing = {doc.page_content[:50] for doc, _ in filtered_results}
+                    for doc, score in veh_docs:
+                        if doc.page_content[:50] not in existing:
+                            filtered_results.append((doc, score))
+                    logger.info(f"vehicle 강제 보완: 타도메인 제거 후 {len(filtered_results)}개")
+
+            # personnel 도메인 → 물류팀 현황 데이터 전체 강제 보완
+            # Fix: personnel은 23개 문서 → limit=30으로 전체 보장
+            if domain == "personnel":
+                # 운영규칙도 함께 보완 (지게차 요청 등이 personnel로 분류될 때 대비)
+                per_docs = self.fetch_whole_docs(["물류팀 현황 데이터", "물류팀 운영 규칙"], limit=30)
+                if per_docs:
+                    existing = {doc.page_content[:50] for doc, _ in filtered_results}
+                    added = 0
+                    for doc, score in per_docs:
+                        if doc.page_content[:50] not in existing:
+                            filtered_results.append((doc, score))
+                            existing.add(doc.page_content[:50])
+                            added += 1
+                    # 벡터 결과에서 personnel 이외 도메인 문서 제거 → 데이터 혼입 방지
+                    filtered_results = [
+                        (doc, score) for doc, score in filtered_results
+                        if doc.metadata.get("domain") == "personnel"
+                        or doc.metadata.get("source") == "물류팀 현황 데이터"
+                    ]
+                    logger.info(f"personnel 강제 보완: +{added}개, 타도메인 문서 제거 후 {len(filtered_results)}개")
+
+            # 지입기사 납품 동선: 전체 20개 문서가 필요 (A+B+공통)
             if domain == "driver_route":
-                driver_docs = self.fetch_whole_docs(["지입 차량(기사) 노선 데이터"], limit=10)
+                driver_docs = self.fetch_driver_docs_by_group()
+                # 20개 미만이면 일부 route_group 누락 → 엑셀 직접 로드
+                if len(driver_docs) < 18:
+                    logger.warning(f"driver_route {len(driver_docs)}건 → 엑셀 직접 로드로 보완")
+                    excel_ctx = build_driver_context_from_excel()
+                    if excel_ctx:
+                        from langchain_core.documents import Document as _Doc
+                        excel_doc = _Doc(page_content=excel_ctx, metadata={"domain":"driver_route","source":"excel_direct"})
+                        driver_docs = [(excel_doc, 1.0)]
                 if driver_docs:
                     filtered_results = driver_docs
                     logger.info(f"지입기사 노선 전용 컨텍스트: {len(driver_docs)}개")
@@ -927,17 +1418,22 @@ class LoggingSystem:
         except Exception as e:
             logger.error(f"로그 컬렉션 오류: {e}")
     
-    def log_query(self, query: str, metadata: Dict = None):
+    def log_query(self, query: str, metadata: Dict = None, team: str = "",
+                  cache_hit: bool = False, hour: int = None):
         """질문 로깅"""
         try:
             query_vector = self.embeddings.embed_query(query)
             query_id = hashlib.md5(
                 f"{query}_{datetime.now().isoformat()}".encode()
             ).hexdigest()
-            
+
+            now = datetime.now()
             payload = {
                 "query": query,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": now.isoformat(),
+                "hour": hour if hour is not None else now.hour,          # 시간대별 분포
+                "cache_hit": cache_hit,                                   # 캐시 히트 여부
+                "team": team,
                 "metadata": json.dumps(metadata or {}, ensure_ascii=False)
             }
             
@@ -952,22 +1448,40 @@ class LoggingSystem:
             logger.error(f"질문 로깅 실패: {e}")
             return None
     
-    def log_answer(self, query_id: str, query: str, answer: str, sources: List[Dict], metadata: Dict = None):
+    def log_answer(self, query: str, answer: str, sources: List[Dict],
+                   metadata: Dict = None, team: str = "",
+                   response_ms: int = 0, domain: str = "",
+                   session_turn: int = 0, hour: int = None):
         """답변 로깅"""
         try:
             answer_vector = self.embeddings.embed_query(answer)
             answer_id = hashlib.md5(
                 f"{answer}_{datetime.now().isoformat()}".encode()
             ).hexdigest()
-            
+
+            # 미해결 질문 감지
+            UNANSWERED_PATTERNS = [
+                "찾을 수 없습니다", "정보를 찾지 못했습니다", "담당자에게 직접 문의",
+                "데이터가 없습니다", "일시적인 오류", "답변 생성에 실패",
+                "관련 정보를 찾을 수 없습니다"
+            ]
+            is_unanswered = any(p in answer for p in UNANSWERED_PATTERNS)
+
+            now = datetime.now()
             payload = {
-                "query_id": query_id,
                 "query": query,
                 "answer": answer,
                 "sources": json.dumps(sources, ensure_ascii=False),
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": now.isoformat(),
+                "hour": hour if hour is not None else now.hour,          # 시간대별 분포
                 "answer_length": len(answer),
                 "source_count": len(sources),
+                "team": team,
+                "response_ms": response_ms,                              # 응답시간(ms)
+                "domain": domain,                                        # 도메인 판별 결과
+                "session_turn": session_turn,                            # 대화 턴 수
+                "is_unanswered": is_unanswered,                         # 미해결 질문 여부
+                "doc_click_count": 0,                                    # 📎 클릭 카운트 (초기값, 이후 갱신)
                 "metadata": json.dumps(metadata or {}, ensure_ascii=False)
             }
             
@@ -975,9 +1489,12 @@ class LoggingSystem:
                 collection_name=ANSWER_LOG_COLLECTION,
                 points=[PointStruct(id=answer_id, vector=answer_vector, payload=payload)]
             )
+
+            return answer_id
             
         except Exception as e:
             logger.error(f"답변 로깅 실패: {e}")
+            return None
 
 
 class LearningSystem:
@@ -1018,8 +1535,8 @@ class LearningSystem:
             logger.error(f"컬렉션 오류: {e}")
     
     def save_interaction(self, query: str, answer: str, sources: List[Dict], 
-                        feedback_score: Optional[float] = None):
-        """긍정 피드백 상호작용 저장"""
+                        feedback_score: Optional[float] = None, team: str = ""):
+        """👍 긍정 피드백 상호작용 저장 (따봉 클릭 시에만 호출)"""
         try:
             query_vector = self.embeddings.embed_query(query)
             
@@ -1032,21 +1549,23 @@ class LearningSystem:
                 "answer": answer,
                 "sources": json.dumps(sources, ensure_ascii=False),
                 "timestamp": datetime.now().isoformat(),
-                "feedback_score": feedback_score or 0.0,
+                "feedback_score": feedback_score or 1.0,
                 "usage_count": 1,
-                "avg_quality": sum(s.get('score', 0) for s in sources) / len(sources) if sources else 0.0
+                "avg_quality": sum(s.get('score', 0) for s in sources) / len(sources) if sources else 0.0,
+                "team": team,  # 부서 모드 (국내영업팀/해외영업팀/트랙영업팀)
             }
             
             self.client.upsert(
                 collection_name=self.good_collection,
                 points=[PointStruct(id=interaction_id, vector=query_vector, payload=metadata)]
             )
+            logger.info(f"💾 긍정 피드백 저장: [{team}] {query[:30]}...")
             
         except Exception as e:
             logger.error(f"상호작용 저장 실패: {e}")
     
     def save_bad_feedback(self, query: str, answer: str, sources: List[Dict],
-                          reason: str = ""):
+                          reason: str = "", team: str = ""):
         """
         부정 피드백 저장 + 이메일 알림 발송 (사유 포함)
         """
@@ -1064,6 +1583,7 @@ class LearningSystem:
                 "timestamp": timestamp,
                 "feedback_type": "bad",
                 "reason": reason,
+                "team": team,  # 부서 모드
             }
 
             self.client.upsert(
@@ -1126,31 +1646,424 @@ class LearningSystem:
             return []
     
     def update_feedback(self, query: str, feedback_score: float, answer: str = "",
-                        sources: List[Dict] = [], reason: str = ""):
-        """피드백 업데이트"""
+                        sources: List[Dict] = [], reason: str = "", team: str = ""):
+        """피드백 업데이트 — 👍 긍정이면 learning_history 저장, 👎 부정이면 bad_feedback 저장"""
         try:
             if feedback_score >= 0.5:
-                query_vector = self.embeddings.embed_query(query)
-                results = self.client.search(
-                    collection_name=self.good_collection,
-                    query_vector=query_vector,
-                    limit=1
-                )
-                if results:
-                    point_id = results[0].id
-                    current_score = results[0].payload.get('feedback_score', 0.0)
-                    new_score = (current_score + feedback_score) / 2
-                    self.client.set_payload(
-                        collection_name=self.good_collection,
-                        payload={'feedback_score': new_score},
-                        points=[point_id]
-                    )
+                # 👍 따봉: learning_history에 새 포인트로 저장
+                self.save_interaction(query, answer, sources,
+                                      feedback_score=feedback_score, team=team)
             else:
-                # 부정 피드백 시 사유 포함 저장 + 이메일
-                self.save_bad_feedback(query, answer, sources, reason=reason)
+                # 👎 부정 피드백 시 사유 포함 저장 + 이메일
+                self.save_bad_feedback(query, answer, sources, reason=reason, team=team)
         except Exception as e:
             logger.error(f"피드백 업데이트 실패: {e}")
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 시뮬레이터 조회 횟수 카운터 (Qdrant search_count 컬렉션)
+# ──────────────────────────────────────────────────────────────────────────────
+SEARCH_COUNT_COLLECTION = os.getenv("SEARCH_COUNT_COLLECTION", "search_count")
+
+class SearchCountSystem:
+    """
+    시뮬레이터별 일자별 조회 횟수를 Qdrant search_count 컬렉션에 기록.
+    포인트 ID = {simulator}_{YYYY-MM-DD} 의 MD5 해시 (정수)
+    payload: simulator / date / count / last_updated / team
+    벡터: 더미 1차원 (검색 불필요, 집계 전용)
+    """
+    SIMULATORS = [
+        "국내운임비교",
+        "국내최적배차",
+        "컨베어벨트배차",
+        "수출포장량",
+        "크롤러배차",
+    ]
+
+    def __init__(self, qdrant_client: QdrantClient):
+        self.client = qdrant_client
+        self._ensure_collection()
+
+    def _ensure_collection(self):
+        try:
+            existing = [c.name for c in self.client.get_collections().collections]
+            if SEARCH_COUNT_COLLECTION not in existing:
+                # 벡터 검색 불필요 → 1차원 더미 벡터
+                self.client.create_collection(
+                    collection_name=SEARCH_COUNT_COLLECTION,
+                    vectors_config=VectorParams(size=1, distance=Distance.COSINE)
+                )
+                logger.info(f"✅ {SEARCH_COUNT_COLLECTION} 컬렉션 생성 (시뮬레이터 조회 카운터)")
+        except Exception as e:
+            logger.error(f"search_count 컬렉션 생성 실패: {e}")
+
+    def _make_point_id(self, simulator: str, date_str: str) -> int:
+        """simulator+날짜 → 고정 정수 ID (upsert 키로 사용)"""
+        raw = f"{simulator}_{date_str}"
+        return int(hashlib.md5(raw.encode()).hexdigest()[:15], 16)
+
+    def increment(self, simulator: str, team: str = ""):
+        """
+        시뮬레이터 조회 버튼 클릭 시 호출.
+        오늘 날짜 포인트가 있으면 count+1, 없으면 신규 생성.
+        """
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            point_id = self._make_point_id(simulator, today)
+
+            # 기존 포인트 조회
+            try:
+                results = self.client.retrieve(
+                    collection_name=SEARCH_COUNT_COLLECTION,
+                    ids=[point_id],
+                    with_payload=True
+                )
+            except Exception:
+                results = []
+
+            if results:
+                current_count = results[0].payload.get("count", 0)
+                self.client.set_payload(
+                    collection_name=SEARCH_COUNT_COLLECTION,
+                    payload={
+                        "count": current_count + 1,
+                        "last_updated": datetime.now().isoformat(),
+                    },
+                    points=[point_id]
+                )
+                logger.info(f"📊 [{simulator}] {today} count={current_count + 1}")
+            else:
+                self.client.upsert(
+                    collection_name=SEARCH_COUNT_COLLECTION,
+                    points=[PointStruct(
+                        id=point_id,
+                        vector=[0.0],  # 더미 벡터
+                        payload={
+                            "simulator": simulator,
+                            "date": today,
+                            "count": 1,
+                            "last_updated": datetime.now().isoformat(),
+                            "team": team,
+                        }
+                    )]
+                )
+                logger.info(f"📊 [{simulator}] {today} 신규 기록 count=1")
+        except Exception as e:
+            logger.error(f"search_count 기록 실패 [{simulator}]: {e}")
+
+    def get_stats(self, simulator: str = None, days: int = 30) -> List[Dict]:
+        """
+        조회 통계 반환 (집계/대시보드용).
+        simulator=None이면 전체 시뮬레이터.
+        """
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue, Range
+            from datetime import timedelta
+
+            since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            conditions = [
+                FieldCondition(key="date", range=Range(gte=since))
+            ]
+            if simulator:
+                conditions.append(
+                    FieldCondition(key="simulator", match=MatchValue(value=simulator))
+                )
+
+            results = self.client.scroll(
+                collection_name=SEARCH_COUNT_COLLECTION,
+                scroll_filter=Filter(must=conditions),
+                limit=1000,
+                with_payload=True
+            )[0]
+
+            return [
+                {
+                    "simulator": r.payload.get("simulator"),
+                    "date": r.payload.get("date"),
+                    "count": r.payload.get("count", 0),
+                    "team": r.payload.get("team", ""),
+                }
+                for r in results
+            ]
+        except Exception as e:
+            logger.error(f"search_count 통계 조회 실패: {e}")
+            return []
+
+
+def record_simulator_count(simulator: str, team: str = ""):
+    """app.py에서 호출하는 퍼블릭 함수"""
+    global SEARCH_COUNT_SYSTEM
+    if SEARCH_COUNT_SYSTEM:
+        SEARCH_COUNT_SYSTEM.increment(simulator, team)
+    else:
+        logger.warning("SEARCH_COUNT_SYSTEM 미초기화 — 카운트 건너뜀")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 시뮬레이터 Query + Result 상세 로그 (Qdrant simulator_logs 컬렉션)
+# ──────────────────────────────────────────────────────────────────────────────
+SIMULATOR_LOG_COLLECTION = os.getenv("SIMULATOR_LOG_COLLECTION", "simulator_logs")
+
+class SimulatorLogSystem:
+    """
+    시뮬레이터 조회마다 Query(입력값) + Result(결과값)를 Qdrant에 기록.
+    - 컬렉션: simulator_logs
+    - 벡터: 더미 1차원 (집계 전용, 검색 불필요)
+    - payload 공통: simulator / timestamp / date / hour / team
+    - payload 가변: query_params(입력) / result_summary(결과 요약)
+    """
+
+    def __init__(self, qdrant_client: QdrantClient):
+        self.client = qdrant_client
+        self._ensure_collection()
+
+    def _ensure_collection(self):
+        try:
+            existing = [c.name for c in self.client.get_collections().collections]
+            if SIMULATOR_LOG_COLLECTION not in existing:
+                self.client.create_collection(
+                    collection_name=SIMULATOR_LOG_COLLECTION,
+                    vectors_config=VectorParams(size=1, distance=Distance.COSINE)
+                )
+                logger.info(f"✅ {SIMULATOR_LOG_COLLECTION} 컬렉션 생성")
+        except Exception as e:
+            logger.error(f"simulator_logs 컬렉션 생성 실패: {e}")
+
+    def log(self, simulator: str, query_params: dict, result_summary: dict,
+            team: str = "", success: bool = True):
+        """
+        시뮬레이터 조회 1건을 로그에 기록.
+
+        Args:
+            simulator: 시뮬레이터 이름 (예: "국내운임비교")
+            query_params: 입력값 dict
+                예) {"destination": "창원", "weight_kg": 100}
+                예) {"items": [{"code": "6008243", "length_m": 300, "rolls": 3}]}
+            result_summary: 결과 요약 dict
+                예) {"recommended": "화물", "직송": 150000, "화물": 120000}
+                예) {"recommended_vehicle": "18톤", "total_weight_kg": 12915}
+            team: 부서 모드
+            success: 결과 정상 도출 여부
+        """
+        try:
+            now = datetime.now()
+            log_id = hashlib.md5(
+                f"{simulator}_{now.isoformat()}_{json.dumps(query_params, ensure_ascii=False)}".encode()
+            ).hexdigest()
+            # MD5 → 정수 변환 (Qdrant ID는 정수 또는 UUID)
+            log_id_int = int(log_id[:15], 16)
+
+            payload = {
+                "simulator"     : simulator,
+                "timestamp"     : now.isoformat(),
+                "date"          : now.strftime("%Y-%m-%d"),
+                "hour"          : now.hour,
+                "team"          : team,
+                "success"       : success,
+                "query_params"  : json.dumps(query_params,  ensure_ascii=False),
+                "result_summary": json.dumps(result_summary, ensure_ascii=False),
+            }
+
+            self.client.upsert(
+                collection_name=SIMULATOR_LOG_COLLECTION,
+                points=[PointStruct(
+                    id=log_id_int,
+                    vector=[0.0],
+                    payload=payload
+                )]
+            )
+            logger.info(f"📋 [{simulator}] 로그 기록 완료 | 입력={list(query_params.keys())} | 결과={list(result_summary.keys())}")
+
+        except Exception as e:
+            logger.error(f"simulator_logs 기록 실패 [{simulator}]: {e}")
+
+
+def record_simulator_log(simulator: str, query_params: dict, result_summary: dict,
+                         team: str = "", success: bool = True):
+    """
+    app.py에서 시뮬레이터 결과 도출 후 호출하는 퍼블릭 함수.
+
+    사용 예시:
+        record_simulator_log(
+            simulator="국내운임비교",
+            query_params={"destination": "창원", "weight_kg": 100},
+            result_summary={"recommended": "화물", "직송": 150000, "화물": 120000},
+            team=st.session_state.get("selected_team", "")
+        )
+    """
+    global SIMULATOR_LOG_SYSTEM
+    if SIMULATOR_LOG_SYSTEM:
+        SIMULATOR_LOG_SYSTEM.log(simulator, query_params, result_summary, team, success)
+    else:
+        logger.warning("SIMULATOR_LOG_SYSTEM 미초기화 — 로그 건너뜀")
+
+
+def record_doc_click(answer_id: str):
+    """
+    📎 참고문서 버튼 클릭 시 호출.
+    answer_logs 해당 포인트의 doc_click_count를 +1 갱신.
+    """
+    global LOGGING_SYSTEM
+    if not LOGGING_SYSTEM or not answer_id:
+        return
+    try:
+        results = LOGGING_SYSTEM.client.retrieve(
+            collection_name=ANSWER_LOG_COLLECTION,
+            ids=[answer_id],
+            with_payload=True
+        )
+        if results:
+            current = results[0].payload.get("doc_click_count", 0)
+            LOGGING_SYSTEM.client.set_payload(
+                collection_name=ANSWER_LOG_COLLECTION,
+                payload={"doc_click_count": current + 1},
+                points=[answer_id]
+            )
+            logger.info(f"📎 doc_click_count={current + 1} ({answer_id[:8]}...)")
+    except Exception as e:
+        logger.error(f"record_doc_click 실패: {e}")
+
+
+def record_sim_inquiry(simulator: str, team: str = ""):
+    """
+    시뮬레이터 '문의하기' 버튼 클릭 시 호출.
+    search_count 컬렉션의 해당 시뮬레이터 오늘 포인트에 inquiry_count +1.
+    """
+    global SEARCH_COUNT_SYSTEM
+    if not SEARCH_COUNT_SYSTEM:
+        return
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        point_id = SEARCH_COUNT_SYSTEM._make_point_id(simulator, today)
+        results = SEARCH_COUNT_SYSTEM.client.retrieve(
+            collection_name=SEARCH_COUNT_COLLECTION,
+            ids=[point_id],
+            with_payload=True
+        )
+        if results:
+            current = results[0].payload.get("inquiry_count", 0)
+            SEARCH_COUNT_SYSTEM.client.set_payload(
+                collection_name=SEARCH_COUNT_COLLECTION,
+                payload={"inquiry_count": current + 1},
+                points=[point_id]
+            )
+            logger.info(f"📋 [{simulator}] inquiry_count={current + 1}")
+        else:
+            # 조회 기록 없이 문의만 한 경우 신규 생성
+            SEARCH_COUNT_SYSTEM.client.upsert(
+                collection_name=SEARCH_COUNT_COLLECTION,
+                points=[PointStruct(
+                    id=point_id,
+                    vector=[0.0],
+                    payload={
+                        "simulator": simulator,
+                        "date": today,
+                        "count": 0,
+                        "inquiry_count": 1,
+                        "last_updated": datetime.now().isoformat(),
+                        "team": team,
+                    }
+                )]
+            )
+    except Exception as e:
+        logger.error(f"record_sim_inquiry 실패: {e}")
+
+
+
+# query_processor.py에 추가할 함수들
+# Qdrant와 무관하게 엑셀에서 직접 기사 노선 데이터 빌드
+
+import os, re
+from datetime import date, timedelta
+from collections import defaultdict
+from typing import Optional, Dict, List, Tuple
+
+# 엑셀 경로 (환경변수 또는 기본 경로)
+_EXCEL_PATHS = [
+    os.getenv("LOGIBOT_EXCEL_PATH", ""),
+    "data/source_docs/Logibot-Data(기본)_V5.xlsx",
+    "Logibot-Data(기본)_V5.xlsx",
+]
+
+def _find_excel_path() -> Optional[str]:
+    for p in _EXCEL_PATHS:
+        if p and os.path.exists(p):
+            return p
+    return None
+
+def _excel_time_to_str(v) -> str:
+    if isinstance(v, float):
+        total_min = round(v * 24 * 60)
+        h, m = divmod(total_min, 60)
+        return f"{h}시{m:02d}분" if m else f"{h}시"
+    if v is None: return ""
+    return str(v).strip()
+
+def _clean_cell(v) -> str:
+    if v is None: return ""
+    s = str(v).strip().replace("\xa0", " ")
+    s = re.sub(r"\n+", " | ", s)
+    return re.sub(r"\s{2,}", " ", s)
+
+def build_driver_context_from_excel() -> str:
+    """
+    엑셀에서 직접 기사 노선 context_text 빌드.
+    Qdrant 조회 실패 시 fallback으로 사용.
+    모든 기사(공통+A+B) 포함.
+    """
+    excel_path = _find_excel_path()
+    if not excel_path:
+        logger.warning("엑셀 파일을 찾을 수 없습니다 - LOGIBOT_EXCEL_PATH 환경변수 설정 필요")
+        return ""
+
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(excel_path, read_only=True, data_only=True)
+        ws = wb['지입 차량(기사) 노선 데이터']
+        rows = list(ws.iter_rows(values_only=True))
+
+        groups: Dict[tuple, list] = defaultdict(list)
+        for row in rows[1:]:
+            if not row[0]: continue
+            key = (_clean_cell(row[0]), _clean_cell(row[2]), _clean_cell(row[3]))
+            groups[key].append(row)
+
+        segments = []
+        for (driver, weekday, route_group), group_rows in sorted(groups.items()):
+            if not driver or not weekday: continue
+            affil = _clean_cell(group_rows[0][1])
+            stops = []
+            for row in sorted(group_rows, key=lambda r: (r[4] or 0)):
+                seq    = str(row[4] or "")
+                region = _clean_cell(row[5])
+                dest   = _clean_cell(row[6])
+                t      = _excel_time_to_str(row[7])
+                note   = _clean_cell(row[10])
+                note   = re.sub(r'\s*\|\s*\(순서가 연속으로 중복된것\)', '', note)
+                note   = "" if note == "고정운행 노선" else note
+                stop_str = f"{seq}. ({region}) {dest} {t}"
+                if note:
+                    stop_str += f" ※{note}"
+                stops.append(stop_str)
+
+            route_note = ""
+            if route_group in ("A", "B"):
+                route_note = (f"\n※ 서울 기사는 격주 교대 운행 "
+                              f"(이 데이터는 '{route_group}노선'입니다)")
+
+            text = (f"[지입기사 납품 동선 | {driver} | {weekday} | 노선그룹:{route_group}]\n"
+                    f"기사명: {driver} | 소속: {affil} | 요일: {weekday}\n"
+                    f"납품 동선:\n" + "\n".join(stops) + route_note)
+            segments.append(text)
+
+        context = "\n\n".join(segments)
+        logger.info(f"엑셀 직접 로드: 기사+요일 {len(segments)}개 세그먼트")
+        return context
+
+    except Exception as e:
+        logger.error(f"엑셀 직접 로드 실패: {e}")
+        return ""
 
 def clean_cache():
     """캐시 정리"""
@@ -1173,7 +2086,7 @@ def setup_rag_chain():
     
     llm = OnPremiseGemmaLLM()
     embeddings = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_HOST)
-    qdrant_client = QdrantClient(url=QDRANT_HOST)
+    qdrant_client = QdrantClient(url=f"http://{QDRANT_HOST}:{QDRANT_PORT}", api_key=QDRANT_API_KEY)
     vectorstore = Qdrant(client=qdrant_client, collection_name=QDRANT_COLLECTION, embeddings=embeddings)
     
     rag_chain = RAGChainWrapper(vectorstore, llm, embeddings, qdrant_client)
@@ -1206,7 +2119,11 @@ def format_answer(answer: str) -> str:
         return ""
 
     # 유사도 점수 패턴 제거
-    answer = re.sub(r'\s?\d\.\d{3}\b', '', answer)
+    # RAG 내부 similarity score(0.XXX / 1.000)가 답변에 노출되는 현상 방지
+    # 보호: 전화번호(010-...), 수식 결과(= 0.856), 표 내부
+    # 제거 조건: 앞이 일반 공백(= 제외)이고 뒤가 공백 또는 줄끝인 단독 소수점
+    answer = re.sub(r'(?<=[^=\d])\s(0\.\d{3}|1\.000)(?=\s|$)', ' ', answer, flags=re.MULTILINE)
+    answer = re.sub(r'^(0\.\d{3}|1\.000)(?=\s|$)', '', answer, flags=re.MULTILINE)
 
     # LaTeX 변환
     answer = re.sub(r'\\frac\{(.+?)\}\{(.+?)\}', r'(\1 / \2)', answer)
@@ -1282,68 +2199,135 @@ def build_conversation_context(context_history: List[Dict]) -> str:
 def _format_driver_route_answer(query: str, context_text: str) -> str:
     """
     지입기사 납품 동선 답변 - Python 직접 포맷팅 (LLM 미사용).
-
-    기능:
-    (1) 동일 노선 요일 자동 묶기 (월~금 → "월~금 (매일)")
-    (2) 서울 기사(이용구/심효섭) 격주 노선 교대
-        - 이번 주 운행 기사 노선 먼저, 다음 주 기사 노선은 아래에 참고용 표시
-    (3) "현재 위치/지금 어디" 질문: 현재 시각으로 예상 위치 계산
+    V5 텍스트 형식: "[지입기사 납품 동선 | 기사명 | 요일 | 노선그룹:xxx]"
+    각 경유지: "순서. (권역) 거래처명 시간 ※특이사항"
     """
     import re as _re
-    from datetime import date as _date, datetime as _dt
+    from datetime import date as _date, datetime as _dt, timedelta as _td
 
-    # ── 0. 현재 위치 조회 요청 감지 ─────────────────────────────────────
-    LOCATION_KW = ["현재 위치", "지금 어디", "현재 어디", "어디 있", "몇 시에", "지금 위치",
-                   "예상 위치", "현재위치", "지금쯤", "어디쯤"]
+    # ── 0. 현재 위치 조회 감지 ───────────────────────────────────────────
+    LOCATION_KW = ["현재 위치","지금 어디","현재 어디","어디 있","지금 위치","예상 위치","지금쯤","어디쯤"]
     is_location_query = any(k in query for k in LOCATION_KW)
 
-    # ── 1. 소속/이름 범위 감지 ────────────────────────────────────────────
-    scope_busan   = any(k in query for k in ["부산", "부산공장", "부산 기사"])
-    scope_seoul   = any(k in query for k in ["서울", "중부", "중부물류", "수도권"])
-    specific_name = next((n for n in ["김병일", "김영철", "이용구", "심효섭"] if n in query), None)
+    # ── 1. 범위 감지 ─────────────────────────────────────────────────────
+    scope_busan  = any(k in query for k in ["부산","부산공장","부산 기사"])
+    scope_seoul  = any(k in query for k in ["서울","중부","중부물류","수도권"])
+    specific_name = next((n for n in ["김병일","김영철","이용구","심효섭"] if n in query), None)
 
-    # ── 2. 격주 운행 판별 ────────────────────────────────────────────────
-    # 기준: 2025년 1월 6일(월) = 이용구 노선 운행 1주차
-    # 홀수 주(0,2,4...) → 이용구 노선 운행주, 짝수 주(1,3,5...) → 심효섭 노선 운행주
-    _BASE_MONDAY      = _date(2025, 1, 6)
-    _today            = _date.today()
-    _week_elapsed     = ((_today - _BASE_MONDAY).days) // 7
-    _this_week_driver = "이용구" if _week_elapsed % 2 == 0 else "심효섭"
-    _next_week_driver = "심효섭" if _week_elapsed % 2 == 0 else "이용구"
+    # ── 2. 격주 판별 ─────────────────────────────────────────────────────
+    BIWEEKLY_ANCHOR_DATE = _date(2026, 5, 25)  # 5/28 적용 시작주의 월요일
+    _today  = _date.today()
+    _mon    = _today - _td(days=_today.weekday())
+    _weeks  = (_mon - BIWEEKLY_ANCHOR_DATE).days // 7
+    _this_week_driver = "이용구" if _weeks % 2 == 0 else "심효섭"
+    _next_week_driver = "심효섭" if _this_week_driver == "이용구" else "이용구"
 
-    # ── 3. context_text 파싱 ─────────────────────────────────────────────
-    driver_blocks: dict = {}
-    current_driver = None
-    for line in context_text.split('\n'):
-        h2 = _re.match(r'^##\s+(.+)', line.strip())
-        if h2:
-            current_driver = h2.group(1).strip()
-            driver_blocks[current_driver] = []
-            continue
-        if current_driver and line.strip().startswith('|') and '---' not in line:
-            cells = [c.strip() for c in line.strip().strip('|').split('|')]
-            if len(cells) >= 2 and cells[0] not in ('요일', ''):
-                driver_blocks[current_driver].append((cells[0], cells[1]))
+    # ── 3. stop_line 파싱 함수 ───────────────────────────────────────────
+    def _parse_stop(line: str):
+        """
+        "6. (대저) 동양알앤비 14시05분 ※발주에 따른 변동운행 노선 | (순서가 연속으로 중복된것)"
+        → (seq, region, dest, time_str, note)
+        """
+        # "(순서가 연속으로 중복된것)" 제거
+        line = _re.sub(r'\s*\|\s*\(순서가 연속으로 중복된것\)', '', line)
+        line = _re.sub(r'\(순서가 연속으로 중복된것\)', '', line).strip()
 
-    if not driver_blocks:
+        seq_m = _re.match(r'^(\d+)\.\s*', line)
+        seq = int(seq_m.group(1)) if seq_m else 0
+        rest = line[seq_m.end():] if seq_m else line
+
+        region_m = _re.match(r'\(([^)]+)\)\s*', rest)
+        region = region_m.group(1) if region_m else ""
+        rest = rest[region_m.end():] if region_m else rest
+
+        note = ""
+        note_m = _re.search(r'※(.+)$', rest)
+        if note_m:
+            note = note_m.group(1).strip()
+            rest = rest[:note_m.start()].strip()
+
+        time_m = _re.search(r'(\d+시(?:\d+분)?(?:\s*이후)?)\s*$', rest)
+        time_str = time_m.group(1).strip() if time_m else ""
+        dest = rest[:time_m.start()].strip() if time_m else rest.strip()
+
+        return seq, region, dest, time_str, note
+
+    # ── 4. context_text 파싱 (V5 형식) ──────────────────────────────────
+    # {driver_name: {weekday: [(seq, region, dest, time, note), ...]}}
+    from collections import defaultdict
+    driver_day_stops: dict = defaultdict(lambda: defaultdict(list))
+
+    HEADER_PAT = r'\[지입기사 납품 동선 \| (.+?) \| (.+?) \| 노선그룹:(.+?)\]'
+    v5_headers = list(_re.finditer(HEADER_PAT, context_text))
+
+    # 이번 주 격주 그룹 (A or B)
+    _wg = "B" if _weeks % 2 == 0 else "A"
+    # 기사별 route_group 저장 (출력 단계에서 이번주/다음주 구분에 사용)
+    driver_route_group: dict = {}
+
+    if v5_headers:
+        for idx_h, m in enumerate(v5_headers):
+            driver_name  = m.group(1).strip()
+            weekday      = m.group(2).strip()
+            route_grp    = m.group(3).strip()  # '공통', 'A', 'B'
+            body_start   = m.end()
+            body_end     = v5_headers[idx_h + 1].start() if idx_h + 1 < len(v5_headers) else len(context_text)
+            body         = context_text[body_start:body_end]
+
+            # route_group 저장 (기사명 → route_group 매핑)
+            if driver_name not in driver_route_group:
+                driver_route_group[driver_name] = route_grp
+
+            in_stops = False
+            for line in body.split('\n'):
+                line = line.strip()
+                if '납품 동선:' in line:
+                    in_stops = True
+                    continue
+                if (in_stops and line
+                        and not line.startswith('기사명:')
+                        and not line.startswith('소속:')
+                        and not line.startswith('요일:')
+                        and not line.startswith('※ 서울')):
+                    parsed = _parse_stop(line)
+                    if parsed[2] and parsed[0] > 0:  # Fix: dest 있고 seq 유효(0 제외)
+                        # 중복 방지: 동일 seq+dest가 이미 있으면 추가하지 않음
+                        existing = driver_day_stops[driver_name][weekday]
+                        if not any(e[0]==parsed[0] and e[2]==parsed[2] for e in existing):
+                            existing.append(parsed)
+
+    if not driver_day_stops:
+        # 파싱 실패 시 specific_name 기준 필터링
+        if specific_name:
+            filtered = []
+            capture = False
+            for line in context_text.split('\n'):
+                if specific_name in line and '지입기사 납품 동선' in line:
+                    capture = True
+                elif '[지입기사 납품 동선' in line and specific_name not in line:
+                    capture = False
+                if capture:
+                    filtered.append(line)
+            if filtered:
+                return '\n'.join(filtered)
         return context_text
 
-    # ── 4. 기본 정보 ─────────────────────────────────────────────────────
+    # ── 5. 기본 정보 ─────────────────────────────────────────────────────
     BUSAN_DRIVERS = ["김병일", "김영철"]
     SEOUL_DRIVERS = ["이용구", "심효섭"]
-    DAY_ORDER     = {"월요일": 0, "화요일": 1, "수요일": 2, "목요일": 3, "금요일": 4}
-    DRIVER_INFO   = {
-        "김병일": {"tel": "010-3587-4581", "car": "3.5톤 카고", "area": "부산·경남권"},
-        "김영철": {"tel": "010-7123-6231", "car": "1톤 카고",   "area": "울산·마산·창원권"},
-        "이용구": {"tel": "010-9263-4190", "car": "2.5톤 카고", "area": "서울·경기·인천권"},
-        "심효섭": {"tel": "010-5291-6593", "car": "2.5톤 카고", "area": "서울 도심권"},
+    DAY_ORDER = {"월요일":0,"화요일":1,"수요일":2,"목요일":3,"금요일":4}
+    DRIVER_INFO = {
+        "김병일": {"tel":"010-3587-4581","car":"3.5톤 카고","area":"부산·경남권"},
+        "김영철": {"tel":"010-7123-6231","car":"1톤 카고","area":"울산·마산·창원권"},
+        "이용구": {"tel":"010-9263-4190","car":"2.5톤 카고","area":"서울·경기·인천권"},
+        "심효섭": {"tel":"010-5291-6593","car":"2.5톤 카고","area":"서울 도심권"},
     }
 
     def _get_info(name_key: str) -> dict:
         for k, v in DRIVER_INFO.items():
             if k in name_key:
                 return {"short": k, **v}
-        return {"short": name_key, "tel": "-", "car": "-", "area": "-"}
+        return {"short": name_key, "tel":"-","car":"-","area":"-"}
 
     def _should_include(driver_key: str) -> bool:
         short = _get_info(driver_key)["short"]
@@ -1355,236 +2339,104 @@ def _format_driver_route_answer(query: str, context_text: str) -> str:
             return short in SEOUL_DRIVERS
         return True
 
-    # ── 5. 동일 노선 요일 묶기 ───────────────────────────────────────────
-    def _compress_routes(routes: list) -> list:
-        if not routes:
+    # ── 6. 요일별 경유지 패턴 비교 → 묶기 ────────────────────────────────
+    def _compress_days(day_stops: dict) -> list:
+        """
+        day_stops: {weekday: [(seq,region,dest,time,note), ...]}
+        → 동일 패턴 요일 묶기
+        반환: [(day_label, first_day, [(seq,region,dest,time,note), ...]), ...]
+        """
+        if not day_stops:
             return []
-        sorted_r = sorted(routes, key=lambda x: DAY_ORDER.get(x[0], 99))
-        dest_map: dict = {}
-        for day, dest in sorted_r:
-            key = _re.sub(r'\s+', ' ', dest.strip())
-            dest_map.setdefault(key, []).append(day)
 
-        compressed = []
-        for dest_key, days in dest_map.items():
-            days_s = sorted(days, key=lambda d: DAY_ORDER.get(d, 99))
-            idxs   = [DAY_ORDER.get(d, 99) for d in days_s]
-            consec = all(idxs[i+1]-idxs[i]==1 for i in range(len(idxs)-1))
+        def pat_key(stops):
+            # 순서와 중복을 제거하고 내용(권역+거래처)만 비교
+            return frozenset((r, d) for _, r, d, _, _ in stops)
 
-            if len(days_s) == 5:
-                label = "**월~금 (매일)**"
-            elif consec and len(days_s) >= 3:
-                label = f"**{days_s[0][:1]}~{days_s[-1][:1]}요일**"
-            elif consec and len(days_s) == 2:
-                label = f"**{'·'.join(d[:1] for d in days_s)}요일**"
+        groups = defaultdict(list)
+        for day, stops in day_stops.items():
+            groups[pat_key(stops)].append(day)
+
+        result = []
+        for pat, days in groups.items():
+            days_sorted = sorted(days, key=lambda d: DAY_ORDER.get(d, 99))
+            idxs = [DAY_ORDER.get(d, 99) for d in days_sorted]
+            consec = len(idxs) > 1 and all(idxs[i+1]-idxs[i]==1 for i in range(len(idxs)-1))
+
+            if len(days_sorted) == 5:
+                label = "월~금 (매일)"
+            elif consec and len(days_sorted) >= 3:
+                label = f"{days_sorted[0][:1]}~{days_sorted[-1][:1]}요일"
+            elif consec and len(days_sorted) == 2:
+                label = f"{'·'.join(d[:1] for d in days_sorted)}요일"
             else:
-                label = "**" + "·".join(d[:1]+"요일" for d in days_s) + "**"
+                # 단일 요일 or 비연속 → 각 요일명 그대로 사용
+                label = "·".join(days_sorted)
 
-            compressed.append((label, dest_key))
+            first_day = days_sorted[0]
+            stops = day_stops[first_day]
+            # (label, first_day, stops) 형식으로 저장 — 정렬 키로 first_day 사용
+            result.append((label, first_day, stops))
 
-        def _first_idx(item):
-            lbl = item[0].replace("*","")
-            for d, i in DAY_ORDER.items():
-                if d[:1] in lbl:
-                    return i
-            return 99
-        compressed.sort(key=_first_idx)
-        return compressed
+        # first_day 기준으로 정렬 (월→화→수→목→금)
+        result.sort(key=lambda x: DAY_ORDER.get(x[1], 99))
+        return result
 
-    # ── 6. 납품 동선 포맷팅 ──────────────────────────────────────────────
-    def _is_sequential(dest_raw: str) -> bool:
-        """
-        납품처들이 순차 납품인지 분기(주문건수에 따라 변동)인지 판별.
-        시간이 모두 다르고 단조 증가하면 순차, 동일 시간 존재 시 분기.
-        """
-        items = [s.strip() for s in dest_raw.replace('\n',' / ').split(' / ') if s.strip()]
-        times = []
-        for item in items:
-            m = _re.search(r'\((\d{1,2})시(\d{1,2})?분?\)', item)
-            if m:
-                times.append(int(m.group(1))*60 + int(m.group(2) or 0))
-        if len(times) < 2:
-            return True
-        return len(set(times)) == len(times) and times == sorted(times)
-
-    def _fmt_dest(dest_raw: str) -> str:
-        """
-        납품 동선 포맷팅.
-        - 순차 납품: ① ② ③ ... 번호로 나열
-        - 분기 납품: 🔀 A / B / C 형태로 표시 (주문건수에 따라 변동)
-        """
-        items = [s.strip() for s in dest_raw.replace('\n',' / ').split(' / ') if s.strip()]
-        if not items:
-            return dest_raw
-
-        if _is_sequential(dest_raw):
-            # 순차 납품 → 번호 나열
-            return "<br>".join(f"**{i}.** {s}" for i, s in enumerate(items, 1))
-        else:
-            # 분기 납품 → 🔀 A / B / C 형태
-            # 같은 시간대끼리 그룹핑해서 묶기
-            groups = []
-            current_group = [items[0]]
-            for i in range(1, len(items)):
-                # 앞 아이템과 시간이 같으면 같은 그룹
-                def get_min(s):
-                    m = _re.search(r'\((\d{1,2})시(\d{1,2})?분?\)', s)
-                    return int(m.group(1))*60+int(m.group(2) or 0) if m else -1
-                if get_min(items[i]) == get_min(items[i-1]):
-                    current_group.append(items[i])
-                else:
-                    groups.append(current_group)
-                    current_group = [items[i]]
-            groups.append(current_group)
-
-            parts_out = []
-            for g in groups:
-                if len(g) == 1:
-                    parts_out.append(f"**{len(parts_out)+1}.** {g[0]}")
-                else:
-                    parts_out.append("🔀 " + "  /  ".join(g) + " _(주문건수에 따라 변동)_")
-            return "<br>".join(parts_out)
-
-    # ── 7. ★ 현재 예상 위치 계산 ────────────────────────────────────────
-    def _parse_time_stops(dest_raw: str) -> list:
-        """
-        납품 동선 문자열에서 [(거래처명, HH, MM), ...] 파싱.
-        실제 context_text 형태: " / " 구분자 한 줄 문자열
-        "(서울)흥진사(10시)" → ("흥진사", 10, 0)
-        "(서울)명진(10시5분)" → ("명진", 10, 5)
-        """
-        # " / " 또는 줄바꿈으로 분리
-        raw_clean = dest_raw.replace('\r\n', ' / ').replace('\n', ' / ').replace('\r', '')
-        items     = [s.strip() for s in raw_clean.split(' / ') if s.strip()]
-        stops = []
-        for item in items:
-            m = _re.search(
-                r'\(([^)]+)\)([^(]+)\((\d{1,2})시(\d{1,2})?분?\)',
-                item
-            )
-            if m:
-                name = m.group(2).strip()
-                hh   = int(m.group(3))
-                mm   = int(m.group(4)) if m.group(4) else 0
-                stops.append((name, hh, mm))
-        return stops
-
-    def _estimate_location(driver_name: str, routes: list) -> str:
-        """
-        현재 시각 기준으로 기사 예상 위치 계산.
-        오늘 요일의 노선에서 현재 시각과 납품 예정 시각을 비교.
-        """
-        now        = _dt.now()
-        weekday    = now.weekday()   # 0=월 ~ 4=금
-        day_names  = ["월요일","화요일","수요일","목요일","금요일","토요일","일요일"]
-        today_name = day_names[weekday]
-
-        # 주말
-        if weekday >= 5:
-            return f"⛔ 오늘은 **{today_name}**입니다. {driver_name} 기사는 주말에 운행하지 않습니다."
-
-        # 오늘 요일 노선 찾기
-        today_route = next((dest for day, dest in routes if day == today_name), None)
-        if not today_route:
-            return f"오늘({today_name}) {driver_name} 기사의 노선 데이터를 찾을 수 없습니다."
-
-        stops = _parse_time_stops(today_route)
-        if not stops:
-            return f"{driver_name} 기사의 오늘 노선에서 시간 데이터를 파싱할 수 없습니다."
-
-        now_min = now.hour * 60 + now.minute
-        first_stop_min = stops[0][1] * 60 + stops[0][2]
-        last_stop_min  = stops[-1][1] * 60 + stops[-1][2]
-
-        # 출발 전
-        if now_min < first_stop_min:
-            diff = first_stop_min - now_min
-            return (
-                f"🕐 현재 시각 **{now.hour:02d}:{now.minute:02d}** 기준\n\n"
-                f"아직 출발 전입니다. 첫 납품지 **{stops[0][0]}** 도착 예정까지 약 **{diff}분** 남았습니다."
-            )
-
-        # 마지막 납품 완료 후
-        if now_min > last_stop_min + 30:
-            return (
-                f"🕐 현재 시각 **{now.hour:02d}:{now.minute:02d}** 기준\n\n"
-                f"오늘 납품이 완료되었을 것으로 예상됩니다. "
-                f"마지막 납품지 **{stops[-1][0]}** 도착 예정 시각은 **{stops[-1][1]:02d}:{stops[-1][2]:02d}**였습니다."
-            )
-
-        # 현재 납품 중
-        location_msg = ""
-        for i, (name, hh, mm) in enumerate(stops):
-            stop_min = hh * 60 + mm
-            if now_min == stop_min:
-                location_msg = f"📍 **{name}** 납품 중 (예정 도착 시각: **{hh:02d}:{mm:02d}**)"
-                break
-            if now_min < stop_min:
-                if i == 0:
-                    location_msg = f"🚗 이동 중 → **{name}** 도착 예정 **{hh:02d}:{mm:02d}** (약 {stop_min - now_min}분 후)"
-                else:
-                    prev_name, prev_hh, prev_mm = stops[i-1]
-                    location_msg = (
-                        f"🚗 **{prev_name}** 납품 완료 후 **{name}** 이동 중\n"
-                        f"  → {name} 도착 예정 **{hh:02d}:{mm:02d}** (약 {stop_min - now_min}분 후)"
-                    )
-                break
-
-        if not location_msg:
-            location_msg = f"📍 **{stops[-1][0]}** 근처에 있을 것으로 예상됩니다."
-
-        # 전체 오늘 동선 요약
-        route_summary = "\n".join(
-            f"  {'✅' if (h*60+m) <= now_min else '⏳'} **{h:02d}:{m:02d}** {n}"
-            for n, h, m in stops
-        )
-
-        return (
-            f"🕐 현재 시각 **{now.hour:02d}:{now.minute:02d}** ({today_name}) 기준\n\n"
-            f"### {driver_name} 기사 예상 현재 위치\n"
-            f"{location_msg}\n\n"
-            f"**오늘({today_name}) 전체 동선:**\n{route_summary}\n\n"
-            f"> ⚠️ 예상 위치는 납품 시각 기준 추정값입니다. 실제 위치는 기사에게 직접 확인해 주세요."
-        )
-
-    # ── 8. 현재 위치 질문 처리 ───────────────────────────────────────────
+    # ── 7. 현재 위치 질문 처리 ───────────────────────────────────────────
     if is_location_query:
         target_name = specific_name
         if not target_name:
-            # 이름 미지정 시 서울 기사이면 이번 주 운행자, 부산이면 안내
             if scope_seoul and not scope_busan:
                 target_name = _this_week_driver
-            elif scope_busan and not scope_seoul:
-                return "현재 위치 조회는 특정 기사 이름을 포함해 질문해 주세요. (예: '김병일 기사 지금 어디?')"
             else:
-                return "현재 위치를 조회할 기사 이름을 포함해 질문해 주세요. (예: '심효섭 기사 지금 어디?')"
+                return "현재 위치를 조회할 기사 이름을 포함해 질문해 주세요. (예: '김병일 기사 지금 어디?')"
 
-        # target 기사의 routes 찾기
-        target_routes = None
-        for dk, rv in driver_blocks.items():
-            if target_name in dk:
-                target_routes = rv
-                break
+        if target_name in SEOUL_DRIVERS and target_name != _this_week_driver:
+            return (f"⏸️ **{target_name} 기사**는 이번 주 운행 주간이 아닙니다.\n\n"
+                    f"이번 주 서울 운행은 **{_this_week_driver} 기사** 담당입니다.")
 
-        if target_routes is None:
+        target_key = next((k for k in driver_day_stops if target_name in k), None)
+        if not target_key:
             return f"{target_name} 기사의 노선 데이터를 찾을 수 없습니다."
 
-        # 서울 기사: 이번 주 운행 여부 확인
-        if target_name in SEOUL_DRIVERS:
-            if target_name != _this_week_driver:
-                return (
-                    f"⏸️ **{target_name} 기사**는 이번 주 운행 주간이 아닙니다.\n\n"
-                    f"이번 주 서울 운행은 **{_this_week_driver} 기사** 담당입니다.\n"
-                    f"다음 주부터 **{target_name} 기사** 노선으로 변경됩니다.\n\n"
-                    f"📞 확인이 필요하면 **{target_name} 기사 ({DRIVER_INFO[target_name]['tel']})**에게 직접 문의해 주세요."
-                )
+        day_stops = driver_day_stops[target_key]
+        now = _dt.now()
+        weekday_names = ["월요일","화요일","수요일","목요일","금요일","토요일","일요일"]
+        today_name = weekday_names[now.weekday()]
+        if now.weekday() >= 5:
+            return f"⛔ 오늘은 **{today_name}**입니다. {target_name} 기사는 주말에 운행하지 않습니다."
+        today_stops = day_stops.get(today_name, [])
+        if not today_stops:
+            return f"오늘({today_name}) {target_name} 기사의 노선 데이터가 없습니다."
+        now_min = now.hour * 60 + now.minute
+        stops_timed = [(s, int(_re.search(r'(\d+)시(\d+)?', s[3]).group(1))*60 + int(_re.search(r'(\d+)시(\d+)?', s[3]).group(2) or 0))
+                       for s in today_stops if _re.search(r'(\d+)시', s[3])]
+        if not stops_timed:
+            return f"{target_name} 기사의 오늘 납품 시간 정보를 파싱할 수 없습니다."
+        first_min = stops_timed[0][1]
+        last_min  = stops_timed[-1][1]
+        if now_min < first_min:
+            diff = first_min - now_min
+            return (f"🕐 현재 **{now.hour:02d}:{now.minute:02d}** 기준\n\n"
+                    f"아직 출발 전입니다. 첫 납품지 **{stops_timed[0][0][2]}** 까지 약 **{diff}분** 남았습니다.")
+        if now_min > last_min + 30:
+            return (f"🕐 현재 **{now.hour:02d}:{now.minute:02d}** 기준\n\n"
+                    f"오늘 납품이 완료되었을 것으로 예상됩니다.")
+        location_msg = ""
+        for i, (s, smin) in enumerate(stops_timed):
+            if now_min <= smin:
+                location_msg = (f"🚗 **{s[2]}** {'납품 중' if now_min==smin else '이동 중'} "
+                                f"(예정 **{s[3]}**, 약 {smin-now_min}분 후)")
+                break
+        if not location_msg:
+            location_msg = f"📍 **{stops_timed[-1][0][2]}** 근처"
+        return (f"🕐 현재 **{now.hour:02d}:{now.minute:02d}** ({today_name}) 기준\n\n"
+                f"### {target_name} 기사 예상 위치\n{location_msg}\n\n"
+                f"> ⚠️ 예상 위치는 납품 시각 기준 추정값입니다. 기사에게 직접 확인해 주세요.")
 
-        return _estimate_location(target_name, target_routes)
-
-    # ── 9. 일반 노선 조회 답변 ───────────────────────────────────────────
+    # ── 8. 일반 노선 조회 답변 생성 ──────────────────────────────────────
     lines = []
 
-    # 도입 멘트
     if specific_name:
         lines.append(f"**{specific_name} 기사** 납품 동선 정보입니다.\n")
     elif scope_busan and not scope_seoul:
@@ -1594,81 +2446,92 @@ def _format_driver_route_answer(query: str, context_text: str) -> str:
     else:
         lines.append("지입기사 전원의 납품 동선 정보입니다.\n")
 
-    groups = []
-    if not (scope_seoul and not scope_busan):
-        groups.append(("🚚 부산공장 지입기사", BUSAN_DRIVERS))
-    if not (scope_busan and not scope_seoul):
-        groups.append(("🚌 서울(중부물류센터) 지입기사", SEOUL_DRIVERS))
+    groups_to_show = []
+    if specific_name:
+        if specific_name in ["김병일", "김영철"]:
+            groups_to_show.append(("🚚 부산공장 지입기사", ["김병일","김영철"]))
+        else:
+            groups_to_show.append(("🚌 서울(중부물류센터) 지입기사", ["이용구","심효섭"]))
+    else:
+        if not (scope_seoul and not scope_busan):
+            groups_to_show.append(("🚚 부산공장 지입기사", ["김병일","김영철"]))
+        if not (scope_busan and not scope_seoul):
+            groups_to_show.append(("🚌 서울(중부물류센터) 지입기사", ["이용구","심효섭"]))
 
-    for group_title, name_list in groups:
-        is_seoul_group = (name_list == SEOUL_DRIVERS)
-        group_drivers  = [
-            (dk, dv) for dk, dv in driver_blocks.items()
-            if any(n in dk for n in name_list) and _should_include(dk)
-        ]
-        if not group_drivers:
+    for group_title, name_list in groups_to_show:
+        is_seoul_group = ("이용구" in name_list)
+
+        # driver_day_stops에서 해당 그룹 기사 추출 (_should_include 적용)
+        group_drivers = [(dk, dv) for dk, dv in driver_day_stops.items()
+                         if any(n in dk for n in name_list) and _should_include(dk)]
+
+        if not group_drivers and is_seoul_group:
+            # driver_day_stops 자체가 비어있거나 서울 기사 데이터 없음
+            # → Qdrant 재적재 필요 안내
+            lines.append(f"## {group_title}\n")
+            lines.append(f"> ⚠️ Qdrant에서 노선 데이터를 가져오지 못했습니다.")
+            lines.append(f"> `python data_loader.py ... --reset` 으로 재적재 후 다시 질문해 주세요.\n")
+            continue
+        elif not group_drivers:
             continue
 
         lines.append(f"## {group_title}\n")
 
-        # ── 서울 기사: 이번 주 / 다음 주 노선 배너 ──────────────────────
-        if is_seoul_group and not specific_name:
+        if is_seoul_group:
             lines.append(
-                f"> 🗓️ **이번 주 운행 노선: {_this_week_driver} 기사**  "
-                f"｜  다음 주: {_next_week_driver} 기사\n"
-                f"> 두 기사는 격주로 노선을 교대하며 **둘 다 월~금 매일 운행**합니다.\n"
+                f"> 🗓️ **이번 주({_wg}주) 운행: {_this_week_driver} 기사** ｜ 다음 주: {_next_week_driver} 기사\n"
+                f"> 두 기사는 격주로 교대 운행합니다.\n"
             )
-
-        # ── 이번 주 운행 기사 먼저, 다음 주 기사는 뒤에 ─────────────────
-        if is_seoul_group and not specific_name:
             # 이번 주 기사 먼저 정렬
-            group_drivers = sorted(
-                group_drivers,
-                key=lambda x: (0 if _this_week_driver in x[0] else 1)
-            )
+            group_drivers = sorted(group_drivers,
+                                   key=lambda x: (0 if _this_week_driver in x[0] else 1))
 
-        for driver_key, routes in group_drivers:
+        for driver_key, day_stops in group_drivers:
             info  = _get_info(driver_key)
             short = info["short"]
+            drv_rg = driver_route_group.get(driver_key, "공통")
 
-            # 이번 주 / 다음 주 배지
-            if is_seoul_group and not specific_name:
-                if short == _this_week_driver:
+            # 서울 기사: 이번 주/다음 주 구분 태그
+            if is_seoul_group:
+                is_this_week = (drv_rg == _wg or drv_rg == "공통")
+                if specific_name and not is_this_week:
+                    # 명시적으로 다음 주 기사를 물어본 경우
+                    week_tag = "  🔵 **다음 주 운행 노선** (미리보기)"
+                elif specific_name and is_this_week:
                     week_tag = "  🟢 **이번 주 운행 노선**"
+                elif is_this_week:
+                    week_tag = "  🟢 **이번 주 운행**"
                 else:
-                    week_tag = "  🔵 다음 주 운행 노선"
+                    week_tag = "  🔵 다음 주 운행"
             else:
                 week_tag = ""
 
             lines.append(f"### {short} 기사{week_tag}")
-            lines.append(
-                f"- 📱 **{info['tel']}**  |  🚛 {info['car']}  |  📍 {info['area']}"
-            )
-            lines.append("- 운행: **월~금 (주 5일) 매일 운행**\n")
+            lines.append(f"- 📱 **{info['tel']}**  |  🚛 {info['car']}  |  📍 {info['area']}")
+            lines.append(f"- 운행: **월~금 (주 5일) 매일 운행**\n")
 
-            if routes:
-                compressed = _compress_routes(routes)
-                lines.append("| 운행 요일 | 납품 동선 |")
-                lines.append("|:---------:|:---------|")
-                for day_label, dest_raw in compressed:
-                    lines.append(f"| {day_label} | {_fmt_dest(dest_raw)} |")
-                lines.append("")
-            else:
+            # 요일 묶기
+            compressed = _compress_days(day_stops)
+            if not compressed:
                 lines.append("_동선 데이터 없음_\n")
+                continue
 
-    # 특이사항
+            for day_label, _first_day, stops in compressed:
+                lines.append(f"**{day_label}** 납품 동선:\n")
+                lines.append("| 순서 | 권역 | 거래처 | 납품시간 | 운행유형 |")
+                lines.append("|:---:|:----:|------|:------:|:-----:|")
+                for seq, region, dest, time_str, note in sorted([s for s in stops if s[0] > 0], key=lambda x:(x[0], x[3])):
+                    run_type = "🔀 변동" if "변동" in note else "✅ 고정"
+                    lines.append(f"| {seq} | {region} | {dest} | {time_str} | {run_type} |")
+                lines.append("")
+
     if not specific_name:
         lines.append("---")
         lines.append("**💡 운행 특이사항**")
         if not (scope_seoul and not scope_busan):
-            lines.append(
-                "- 부산공장 기사: 미성폴리머(김해)/신항 등 추가 운행은 첫 운행(오전)에만 가능, 점심 이후 불가"
-            )
+            lines.append("- 부산공장 기사: 미성폴리머(김해)/신항 등 추가 운행은 오전에만 가능")
         if not (scope_busan and not scope_seoul):
-            lines.append(
-                f"- 서울 기사: 이용구·심효섭 기사가 **격주로 노선 교대** 운행 "
-                f"(이번 주: **{_this_week_driver}** 기사 노선 / 다음 주: {_next_week_driver} 기사 노선)"
-            )
+            lines.append(f"- 서울 기사: 격주 교대 운행 (이번 주: **{_this_week_driver}** / 다음 주: {_next_week_driver})")
         lines.append("")
 
     lines.append("📞 납품 일정 변경·추가 문의는 **물류팀 담당자**에게 연락해 주세요.")
@@ -1677,11 +2540,22 @@ def _format_driver_route_answer(query: str, context_text: str) -> str:
 
 
 def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: LearningSystem, 
-                 logging_system: LoggingSystem, context: List[Dict] = None) -> Tuple[str, List[Dict], bool]:
+                 logging_system: LoggingSystem, context: List[Dict] = None, team: str = "") -> Tuple[str, List[Dict], bool]:
     """쿼리 처리"""
-    
+
+    _start_ts = time.time()  # ① 응답시간 측정 시작
+    _now      = datetime.now()
+    _hour     = _now.hour
+    _session_turn = len([c for c in (context or []) if c.get("role") == "user"])  # ⑥ 세션 턴 수
+
     # 로깅만 수행
-    query_id = logging_system.log_query(query, metadata={"context_length": len(context or [])})
+    query_id = logging_system.log_query(
+        query,
+        metadata={"context_length": len(context or [])},
+        team=team,
+        hour=_hour,
+        cache_hit=False  # 캐시 히트 여부는 아래에서 갱신
+    )
 
     # 캐시 키: 질문 + 직전 대화 턴의 쿼리를 포함 → 맥락이 다르면 다른 답변
     prev_queries = "||".join(c.get("query", "") for c in (context or [])[-3:])
@@ -1693,8 +2567,30 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
             cached_data = response_cache[cache_key]
             if (datetime.now() - cached_data['timestamp']).seconds < CACHE_TTL:
                 logger.info("✅ 캐시 응답")
+                # ② 캐시 히트 → query_log 갱신
+                try:
+                    if query_id:
+                        logging_system.client.set_payload(
+                            collection_name=QUERY_LOG_COLLECTION,
+                            payload={"cache_hit": True},
+                            points=[query_id]
+                        )
+                except Exception:
+                    pass
                 return cached_data['answer'], cached_data['sources'], cached_data.get('has_table', False)
     
+    # ── 시뮬레이터 유도 체크 ─────────────────────────────────────
+    guide_msg = check_simulator_intent(query)
+    if guide_msg:
+        logging_system.log_answer(
+            query=query, answer=guide_msg, sources=[],
+            metadata={"simulator_guide": True}, team=team,
+            response_ms=int((time.time() - _start_ts) * 1000),
+            domain="simulator_guide", session_turn=_session_turn, hour=_hour,
+        )
+        return guide_msg, [], False
+    # ─────────────────────────────────────────────────────────────
+
     # learning_history에서 유사 상호작용 검색
     similar_interactions = learning_system.search_similar_interactions(query, limit=2, min_score=0.85)
     
@@ -1714,10 +2610,10 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
     
     table_keywords = ["표로", "표 형식", "테이블", "표를", "표 만들"]
     is_table_request = any(kw in query for kw in table_keywords)
-    search_k = 7
-    list_keywords = ["몇 개", "전부", "목록", "리스트", "어디"]
+    search_k = 7  # V4 동일: 기본 검색 문서 수
+    list_keywords = ["몇 개", "전부", "목록", "리스트", "어디", "전체", "모두"]
     if any(kw in query for kw in list_keywords):
-        search_k = 15
+        search_k = 15  # V4 동일: 목록 질문은 더 넓게
 
     # 웹서치를 허용할 명시적 키워드 (사내 데이터에 없는 외부 정보가 필요한 경우)
     WEB_ALLOWED_KW = [
@@ -1765,19 +2661,71 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
             } for doc, score in filtered_docs]
 
             _domain_for_limit = rag_chain._detect_domain(query)
-            _ctx_limit = 8000 if _domain_for_limit == "driver_route" else 4000
+            if _domain_for_limit in ("driver_route", "operation_rule"):
+                _ctx_limit = 8000  # 운영규칙 summary(~5500자) + 개별 청크 여유분
+            elif _domain_for_limit in ("general", "personnel"):
+                _ctx_limit = 6000
+            else:
+                _ctx_limit = 4000
             if len(context_text) > _ctx_limit:
                 context_text = context_text[:_ctx_limit] + "\n..."
 
             if is_table_request:
                 has_table = True
 
-            # ── driver_route: Python 직접 포맷팅 ──
+            # ── driver_route: LLM으로 의도 먼저 분류 → 처리 방식 결정 ─────
             if _domain_for_limit == "driver_route":
-                answer = _format_driver_route_answer(query, context_text)
-                has_table = True
+
+                # 1단계: LLM에게 질문 의도 분류 요청 (경량 호출)
+                intent_prompt = f"""다음 질문의 의도를 아래 3가지 중 하나로만 답하세요. 다른 말은 절대 하지 마세요.
+
+질문: "{query}"
+
+선택지:
+- ROUTE_LOOKUP : 특정 기사의 납품 동선/노선/일정을 조회하는 질문
+- COMPARE_OR_CONFIRM : 비교, 확인, 예/아니오, 의견, 데이터에 없는 정보를 묻는 질문
+- GENERAL_INFO : 연락처, 소속, 차량 정보 등 기사 기본 정보 질문
+
+답:"""
+                try:
+                    intent_raw = rag_chain.llm._call(intent_prompt).strip().upper()
+                    if "ROUTE_LOOKUP" in intent_raw:
+                        intent = "ROUTE_LOOKUP"
+                    elif "GENERAL_INFO" in intent_raw:
+                        intent = "GENERAL_INFO"
+                    else:
+                        intent = "COMPARE_OR_CONFIRM"
+                except Exception:
+                    # LLM 분류 실패 시 키워드 폴백
+                    COMPARE_KW = [
+                        "같은 노선", "동일한 노선", "항상 같", "차이가 있",
+                        "다른가요", "다른지", "비교", "맞나요", "하나요",
+                        "인가요", "할까요", "몇 명", "겹치는", "효율",
+                    ]
+                    intent = "COMPARE_OR_CONFIRM" if any(k in query for k in COMPARE_KW) else "ROUTE_LOOKUP"
+                    logger.warning(f"의도 분류 LLM 실패 → 키워드 폴백: {intent}")
+
+                logger.info(f"driver_route 의도 분류: {intent} | 질문: {query[:40]}")
+
+                if intent == "ROUTE_LOOKUP":
+                    # 노선 조회 → Python 포맷팅 (기존 방식)
+                    answer = _format_driver_route_answer(query, context_text)
+                else:
+                    # 비교·확인·기본정보 → 도메인 프롬프트로 LLM 답변
+                    _d_prompt = get_domain_prompt("driver_route")
+                    formatted_prompt = _d_prompt.format(
+                        context=context_text,
+                        input=query,
+                        history_context=history_context if history_context else "없음",
+                        conversation_context=conversation_context if conversation_context else "없음"
+                    )
+                    answer = rag_chain.llm._call(formatted_prompt)
+
+                has_table = "|" in answer and "---" in answer
             else:
-                formatted_prompt = rag_chain.prompt_template.format(
+                # 도메인별 프롬프트 적용
+                _d_prompt = get_domain_prompt(_domain_for_limit)
+                formatted_prompt = _d_prompt.format(
                     context=context_text,
                     input=query,
                     history_context=history_context if history_context else "없음",
@@ -1854,19 +2802,34 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
         else:
             answer = "관련 정보를 찾을 수 없습니다. 담당자에게 직접 문의해 주세요."
     
-    # learning_history에 저장
-    learning_system.save_interaction(query, answer, sources)
+    # learning_history 저장은 👍 따봉 버튼 클릭 시에만 (submit_feedback → update_feedback 경로)
+    # 여기서 저장하지 않음
     
     # 답변 포맷팅
     answer = format_answer(answer)
-    
-    # 로깅만 수행
-    logging_system.log_answer(
-        query_id=query_id,
+
+    # ① 응답시간 계산
+    _response_ms = int((time.time() - _start_ts) * 1000)
+
+    # ③ 최종 도메인 판별 (use_web_search면 "web", 아니면 rag_chain에서 판별)
+    _final_domain = "web" if use_web_search else getattr(rag_chain, "_last_domain", "")
+    if not _final_domain:
+        try:
+            _final_domain = rag_chain._detect_domain(query)
+        except Exception:
+            _final_domain = "unknown"
+
+    # 로깅
+    _answer_id = logging_system.log_answer(
         query=query,
         answer=answer,
         sources=sources,
-        metadata={"has_table": has_table, "use_web_search": use_web_search}
+        metadata={"has_table": has_table, "use_web_search": use_web_search},
+        team=team,
+        response_ms=_response_ms,
+        domain=_final_domain,
+        session_turn=_session_turn,
+        hour=_hour,
     )
     
     # 캐시 저장
@@ -1875,12 +2838,19 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
             'answer': answer,
             'sources': sources,
             'has_table': has_table,
-            'timestamp': datetime.now()
+            'timestamp': datetime.now(),
+            'answer_id': _answer_id,   # 📎 클릭 시 doc_click_count 갱신용
         }
     
     if len(response_cache) > 100:
         clean_cache()
-    
+
+    # answer_id를 rag_chain에 임시 보관 → get_rag_response에서 반환값으로 전달
+    try:
+        rag_chain._last_answer_id = _answer_id or ""
+    except Exception:
+        pass
+
     return answer, sources, has_table
 
 
@@ -1890,14 +2860,18 @@ try:
     EMAIL_NOTIFIER = EmailNotifier()
     LEARNING_SYSTEM = LearningSystem(RAG_CHAIN.qdrant_client, RAG_CHAIN.embeddings, EMAIL_NOTIFIER)
     LOGGING_SYSTEM = LoggingSystem(RAG_CHAIN.qdrant_client, RAG_CHAIN.embeddings)
+    SEARCH_COUNT_SYSTEM = SearchCountSystem(RAG_CHAIN.qdrant_client)
+    SIMULATOR_LOG_SYSTEM = SimulatorLogSystem(RAG_CHAIN.qdrant_client)
     logger.info("✅ 시스템 완료")
     logger.info("=" * 60)
     logger.info("📊 컬렉션 용도:")
     logger.info("  - logistics_data: 메인 문서 (답변 생성 시 사용)")
-    logger.info("  - learning_history: 긍정 피드백 데이터 (답변 생성 시 사용)")
+    logger.info("  - learning_history: 👍 긍정 피드백 데이터 (따봉 클릭 시에만 저장)")
     logger.info("  - bad_feedback_history: 부정 피드백 데이터 (참고용 + 이메일 알림)")
     logger.info("  - query_logs: 질문 로그 (로깅 전용)")
     logger.info("  - answer_logs: 답변 로그 (로깅 전용)")
+    logger.info("  - search_count: 시뮬레이터 일자별 조회 횟수")
+    logger.info("  - simulator_logs: 시뮬레이터 Query+Result 상세 로그")
     logger.info("=" * 60)
     if EMAIL_NOTIFIER.enabled:
         logger.info(f"📧 이메일 알림: 활성화 → {', '.join(EMAIL_NOTIFIER.email_to)}")
@@ -1910,16 +2884,15 @@ except Exception as e:
     LEARNING_SYSTEM = None
     LOGGING_SYSTEM = None
     EMAIL_NOTIFIER = None
+    SEARCH_COUNT_SYSTEM = None
+    SIMULATOR_LOG_SYSTEM = None
 
 
-def get_rag_response(query: str, context: List[Dict] = None) -> Dict[str, Any]:
+def get_rag_response(query: str, context: List[Dict] = None, team: str = "") -> Dict[str, Any]:
     """RAG 응답 생성"""
     global RAG_CHAIN, LEARNING_SYSTEM, LOGGING_SYSTEM
     
-    answer, sources, has_table = process_query(query, RAG_CHAIN, LEARNING_SYSTEM, LOGGING_SYSTEM, context)
-    
-    # 답변에서 유사도 점수 제거
-    clean_answer = re.sub(r'\s?\d\.\d{3}\b', '', answer).strip()
+    answer, sources, has_table = process_query(query, RAG_CHAIN, LEARNING_SYSTEM, LOGGING_SYSTEM, context, team=team)
 
     # 출처 정보 구성 (중복 제거)
     unique_sources_data = []
@@ -1940,21 +2913,24 @@ def get_rag_response(query: str, context: List[Dict] = None) -> Dict[str, Any]:
             seen.add(f_name)
 
     return {
-        "answer": clean_answer,
+        "answer": answer,
         "sources": unique_sources_data[:3],
         "has_table": has_table,
-        "cached": False
+        "cached": False,
+        "answer_id": getattr(RAG_CHAIN, "_last_answer_id", "") if RAG_CHAIN else "",
     }
 
 
 def submit_feedback(query: str, feedback_score: float, answer: str = "",
-                    sources: List[Dict] = [], reason: str = ""):
+                    sources: List[Dict] = [], reason: str = "", team: str = ""):
     """
     피드백 제출 (부정 피드백 시 사유 포함 자동 이메일 발송)
+    - feedback_score >= 0.5 : 👍 긍정 → learning_history 저장
+    - feedback_score < 0.5  : 👎 부정 → bad_feedback_history 저장 + 이메일
     """
     global LEARNING_SYSTEM
     if LEARNING_SYSTEM:
-        LEARNING_SYSTEM.update_feedback(query, feedback_score, answer, sources, reason=reason)
+        LEARNING_SYSTEM.update_feedback(query, feedback_score, answer, sources, reason=reason, team=team)
     else:
         logger.error("❌ LEARNING_SYSTEM 미초기화")
         
@@ -2028,89 +3004,438 @@ def _calc_loadable_plt(plt_w: float, plt_l: float, car_w: float, car_l: float) -
     return best
 
 
+# ── 운임 비교 시뮬레이터 ──────────────────────────────────────────────────────
+
+# 단거리 권역 (장거리 아닌 것)
+_SHORT_DISTANCE_ZONES = {"경남권", "경북권", "부산권"}
+
+# 장거리 권역 (20% 가산)
+_LONG_DISTANCE_ZONES = {"강원권", "경기권", "서울권", "인천권", "전남권", "전북권", "충남권", "충북권"}
+
+# 중량 → 차종 매핑 (오름차순)
+_WEIGHT_TO_VEHICLE = [
+    (1_000,  "1톤"),
+    (2_500,  "2.5톤"),
+    (3_500,  "3.5톤"),
+    (5_000,  "5톤"),
+    (8_000,  "8톤"),
+    (11_000, "11톤"),
+    (18_000, "18톤"),
+    (25_000, "25톤"),
+    (float("inf"), "트레일러"),
+]
+
+# 도착지 → 권역 매핑 (직송 시트 기준)
+_ZONE_HEADERS = {
+    "(강원권)": "강원권", "(경기권)": "경기권", "(경남권)": "경남권",
+    "(경북권)": "경북권", "(부산권)": "부산권", "(서울권)": "서울권",
+    "(인천권)": "인천권", "(전남권)": "전남권", "(전북권)": "전북권",
+    "(충남권)": "충남권", "(충북권)": "충북권",
+}
+
+
+def _get_vehicle_for_weight(weight_kg: int) -> str:
+    """중량(kg) → 적합 차종"""
+    for limit, vehicle in _WEIGHT_TO_VEHICLE:
+        if weight_kg <= limit:
+            return vehicle
+    return "트레일러"
+
+
+def _get_zone_for_dest(dest: str, all_rows: list) -> Optional[str]:
+    """
+    직송 운임표 전체 rows에서 도착지가 속한 권역 반환.
+    all_rows: [(출발지, 도착지, content), ...]
+    """
+    current_zone = None
+    dest = dest.strip()
+    for _, dest_val, _ in all_rows:
+        dest_val = str(dest_val).strip()
+        if dest_val in _ZONE_HEADERS:
+            current_zone = _ZONE_HEADERS[dest_val]
+        if dest_val == dest or dest in dest_val:
+            return current_zone
+    return None
+
+
+def calculate_fare_comparison(dest: str, weight_kg: int) -> dict:
+    """
+    직송 / 화물 / 택배 운임을 계산해서 비교 결과 반환.
+    - 직송: 중량→차종, 도착지→권역(하드코딩), 장거리 20% 가산
+    - 화물/택배: 도착지 매칭 → 단가 × 중량
+    """
+    result = {"직송": None, "화물": None, "택배": None, "추천": None, "도착지": dest, "중량": weight_kg}
+
+    # 권역별 도착지 하드코딩 (엑셀 데이터 기반)
+    _DEST_TO_ZONE = {}
+    _ZONE_DEST_MAP = {
+        "강원권": ["강릉","도계","동해","묵호","북평","사북","삼척","석포","속초","양양","영양","영월","옥계","원주","정선","철원","춘천","태백","평창","평해","횡성"],
+        "경기권": ["가평","강화군","과천","광명","광주","고양","구리","군포","기흥","김포","남양주","반월","부천","부평","성남","송탄","수색","수원","시흥","의정부","안산","안성","안양","양주","양평","여주","연천","오산","용인","의왕","이천","파주","평택","포천","하남","화성"],
+        "경남권": ["거창","거제도","군위","기장","김해","남해","녹산","대저","덕계","마산","명지","밀양","사천","산청","삼천포","삼랑진","서창","신항","양산","언양","옥포","온산","용원","울산","웅상","웅촌","원동","의령","일광","장유","정관","진동","진례","진성","진양","진영","진주","진해","창녕","창원","철마","칠원","통영","하동","함안","함양","합천","현풍"],
+        "경북권": ["감포","건천","경산","경주","고령","고성","구미","김천","달성","대구","문경","봉화","상주","성주","안동","영덕","영주","영천","예천","왜관","울진","월성","의성","점촌","청도","청송","칠곡","포항","풍기","후포"],
+        "부산권": ["감만","감천","개금","구서","금사동","다대포","동래","만덕","망미동","반여동","사상","서면","신평","안락동","엄궁","연산동","용당","우암","자성대","장림","재송","중앙동","초읍","하단","학장","해운대"],
+        "서울권": ["서울"],
+        "인천권": ["영종도","옹진군","인천"],
+        "전남권": ["강진","고흥","곡성","광양","광주","목포","벌교","순천","여수","여천","장성","장흥","함평","해남"],
+        "전북권": ["고창","군산","김제","나주","남원","담양","무안","무주","부안","순창","영광","영암","완도","완주","이리","익산","전주","정읍","화순"],
+        "충남권": ["공주","금산","논산","당진","대전","대천","보령","부여","서산","서천","신탄진","아산","연기","예산","조치원","천안","태안"],
+        "충북권": ["괴산","단양","보은","세종","옥천","음성","제천","진천","청원","청주","충원","충주"],
+    }
+    for zone, cities in _ZONE_DEST_MAP.items():
+        for city in cities:
+            _DEST_TO_ZONE[city] = zone
+
+    dest_strip = dest.strip()
+    vehicle    = _get_vehicle_for_weight(weight_kg)
+
+    # 권역 판별
+    zone    = _DEST_TO_ZONE.get(dest_strip)
+    is_long = zone in _LONG_DISTANCE_ZONES if zone else False
+
+    logger.info(f"[운임 조회 시작] 도착지:{dest_strip} / 권역:{zone or '미매핑'} / 장거리:{is_long} / 차종:{vehicle} / 중량:{weight_kg}kg")
+
+    try:
+        client = QdrantClient(url=f"http://{QDRANT_HOST}:{QDRANT_PORT}", api_key=QDRANT_API_KEY)
+
+        # ── 직송 운임 조회 ──────────────────────────────────────────────────
+        # data_loader V5: fare_type="직송", source="운임_테이블.xlsx" 으로 저장
+        direct_pts = client.scroll(
+            collection_name=QDRANT_COLLECTION,
+            scroll_filter=models.Filter(must=[models.FieldCondition(
+                key="fare_type", match=models.MatchValue(value="직송")
+            )]),
+            limit=300
+        )[0]
+
+        for pt in direct_pts:
+            payload  = pt.payload
+            content  = payload.get("text") or payload.get("page_content", "")
+            dest_val = str(payload.get("destination", "")).strip()
+            origin   = str(payload.get("departure", "부산")).strip()
+
+            # 도착지 매칭 (정확 일치 우선, 부분 포함 허용)
+            if dest_strip != dest_val and dest_strip not in dest_val:
+                continue
+
+            # fares 딕셔너리에서 바로 차종 요금 추출
+            fares_raw = payload.get("fares", {})
+            if isinstance(fares_raw, dict):
+                fare_val = fares_raw.get(vehicle, "")
+                if fare_val:
+                    try:
+                        fare = int(str(fare_val).replace(",", "").strip())
+                        if fare > 0:
+                            final_fare = round(fare * 1.2) if is_long else fare
+                            result["직송"] = {
+                                "금액": final_fare,
+                                "기본금액": fare,
+                                "차종": vehicle,
+                                "출발지": origin,
+                                "권역": zone or "미분류",
+                                "장거리": is_long,
+                            }
+                            logger.info(
+                                f"[직송 산출] {origin}→{dest_val} / {vehicle} / "
+                                f"기본:{fare:,}원"
+                                + (f" / 장거리20%↑→{final_fare:,}원" if is_long else f" / {final_fare:,}원")
+                            )
+                            break
+                    except Exception:
+                        pass
+
+            # fares 딕셔너리 없으면 text 파싱 fallback
+            if not result["직송"] and content:
+                for line in content.split("\n"):
+                    if vehicle in line and ":" in line:
+                        nums = re.findall(r'[\d,]+', line.split(":")[-1])
+                        for n in nums:
+                            try:
+                                fare = int(n.replace(",", ""))
+                                if fare > 10000:
+                                    final_fare = round(fare * 1.2) if is_long else fare
+                                    result["직송"] = {
+                                        "금액": final_fare,
+                                        "기본금액": fare,
+                                        "차종": vehicle,
+                                        "출발지": origin,
+                                        "권역": zone or "미분류",
+                                        "장거리": is_long,
+                                    }
+                                    break
+                            except Exception:
+                                continue
+                        if result["직송"]:
+                            break
+
+            if result["직송"]:
+                break
+
+        # ── 화물/택배 운임 조회 ────────────────────────────────────────────
+        parcel_pts = client.scroll(
+            collection_name=QDRANT_COLLECTION,
+            scroll_filter=models.Filter(must=[models.FieldCondition(
+                key="fare_type", match=models.MatchValue(value="화물택배")
+            )]),
+            limit=300
+        )[0]
+
+        logger.info(f"[화물/택배] Qdrant 조회 건수: {len(parcel_pts)}")
+
+        for pt in parcel_pts:
+            payload  = pt.payload
+            content  = payload.get("text") or payload.get("page_content", "")
+            dest_val = str(payload.get("destination", "")).strip()
+
+            # 도착지 먼저 text에서 파싱 시도
+            if not dest_val:
+                for part in content.split("|"):
+                    part = part.strip()
+                    if "도착지" in part:
+                        dest_val = part.split(":")[-1].strip()
+                        break
+
+            if dest_strip != dest_val and dest_strip not in dest_val:
+                continue
+
+            logger.info(f"[화물/택배 매칭] 도착지:{dest_val} / content:{content[:80]}")
+
+            # payload fares 직접 추출
+            cargo_rate  = None
+            parcel_rate = None
+
+            hw = payload.get("fare_hwamul", "")
+            tk = payload.get("fare_taekbae", "")
+            if hw:
+                try:
+                    cargo_rate = int(str(hw).replace(",", "").strip())
+                except Exception:
+                    pass
+            if tk:
+                try:
+                    parcel_rate = int(str(tk).replace(",", "").strip())
+                except Exception:
+                    pass
+
+            # fallback: text 파싱
+            if not cargo_rate or not parcel_rate:
+                for part in content.split("|"):
+                    part = part.strip()
+                    if "화물" in part and ":" in part and not cargo_rate:
+                        nums = re.findall(r'\d+', part.split(":")[-1].replace(",", ""))
+                        if nums:
+                            try:
+                                cargo_rate = int(nums[0])
+                            except Exception:
+                                pass
+                    if "택배" in part and ":" in part and not parcel_rate:
+                        nums = re.findall(r'\d+', part.split(":")[-1].replace(",", ""))
+                        if nums:
+                            try:
+                                parcel_rate = int(nums[0])
+                            except Exception:
+                                pass
+
+            if cargo_rate and cargo_rate > 0 and result["화물"] is None:
+                fare = cargo_rate * weight_kg
+                result["화물"] = {"금액": fare, "단가": cargo_rate}
+                logger.info(f"[화물 산출] {dest_val} / {cargo_rate:,}원/kg × {weight_kg}kg = {fare:,}원")
+
+            if parcel_rate and parcel_rate > 0 and result["택배"] is None:
+                fare = parcel_rate * weight_kg
+                result["택배"] = {"금액": fare, "단가": parcel_rate}
+                logger.info(f"[택배 산출] {dest_val} / {parcel_rate:,}원/kg × {weight_kg}kg = {fare:,}원")
+
+            if result["화물"] and result["택배"]:
+                break
+
+    except Exception as e:
+        logger.error(f"운임 비교 계산 오류: {e}")
+        return result
+
+    # ── 추천 결정 (직송 vs 택배만 비교) ──────────────────────────────────
+    compare_targets = {k: v["금액"] for k, v in result.items()
+                       if k in ("직송", "택배") and isinstance(v, dict) and v.get("금액")}
+    if compare_targets:
+        result["추천"] = min(compare_targets, key=compare_targets.get)
+        logger.info(f"[운임 비교 결과] {compare_targets} → 추천: {result['추천']}")
+    else:
+        logger.warning(f"[운임 비교] 조회된 운임 없음 - 직송:{result['직송']} 화물:{result['화물']} 택배:{result['택배']}")
+
+    return result
+
+
+def get_freight_meta() -> dict:
+    """Qdrant에서 직송/화물택배 메타 정보 조회 (selectbox 옵션용)"""
+    try:
+        client = QdrantClient(url=f"http://{QDRANT_HOST}:{QDRANT_PORT}", api_key=QDRANT_API_KEY)
+        # data_loader V5: fare_type 키로 저장
+        direct_pts = client.scroll(collection_name=QDRANT_COLLECTION,
+            scroll_filter=models.Filter(must=[models.FieldCondition(
+                key="fare_type", match=models.MatchValue(value="직송"))]),
+            limit=5)[0]
+        parcel_pts = client.scroll(collection_name=QDRANT_COLLECTION,
+            scroll_filter=models.Filter(must=[models.FieldCondition(
+                key="fare_type", match=models.MatchValue(value="화물택배"))]),
+            limit=5)[0]
+    except Exception as e:
+        logger.error(f"운임 메타 조회 오류: {e}")
+        return {}
+
+    fare_ok   = len(direct_pts) > 0
+    parcel_ok = len(parcel_pts) > 0
+    logger.info(f"운임 메타 조회: 직송={fare_ok}, 화물택배={parcel_ok}")
+    return {"loaded": fare_ok and parcel_ok}
+
+
 def _load_vehicle_candidates(plt_w: float, plt_l: float) -> list:
     """
     Qdrant '차량 데이터' 문서에서 차량 후보 목록을 파싱해 반환.
-    각 후보에 파렛트 배열 기반 max_plt 포함.
+    data_loader V5 텍스트 형식:
+      | 1톤(1.2톤) | ~ 1.32 | 2.8 | 1.6 |
+      | 트레일러(츄레라) | ~ 25 (폭 2.6m 이하) | 12 | 2.34 |
+      | 로브이(Low-v, 로베드, Low-bed) | ~ 24 | 6 | 2.34 |
     """
-    try:
-        client = QdrantClient(url=QDRANT_HOST)
-        search_result = client.scroll(
-            collection_name="logistics_data",
-            scroll_filter=models.Filter(
-                must=[models.FieldCondition(
-                    key="metadata.sheet_name",
-                    match=models.MatchValue(value="차량 데이터")
-                )]
-            ),
-            limit=10
-        )[0]
-        if not search_result:
-            return []
-        content = search_result[0].payload.get("page_content", "")
-    except Exception as e:
-        logger.error(f"차량 데이터 로드 오류: {e}")
-        return []
+    # ── 하드코딩 차량 목록 (Qdrant 조회 실패 시 fallback) ──────────────
+    FALLBACK_VEHICLES_RAW = [
+        ("1톤(1.2톤)",                   "~ 1.32",            2.8,  1.6),
+        ("2.5톤",                        "1.33 ~ 2.75",       4.3,  1.8),
+        ("3.5톤(신규)",                  "2.76 ~ 3.85",       4.8,  2.0),
+        ("5톤",                          "3.86 ~ 5.5",        6.2,  2.34),
+        ("8톤",                          "5.6 ~ 8.2",         7.4,  2.34),
+        ("11톤",                         "8.3 ~ 12",          9.0,  2.34),
+        ("18톤",                         "12.1 ~ 19",         10.1, 2.34),
+        ("25톤",                         "19.1 ~ 25.5",       10.1, 2.34),
+        ("트레일러(츄레라)",              "~ 25 (폭 2.6m 이하)", 12.0, 2.34),
+        ("로브이(Low-v, 로베드, Low-bed)","~ 24",              6.0,  2.34),
+    ]
 
     def _parse_max_weight(wt_str: str) -> Optional[float]:
-        """
-        '~ 1.32', '1.33 ~ 2.75', '~ 25 (폭 2.6m 이하)' 등에서
-        차량 최대 허용 중량(ton)만 추출.
-        ─ '폭 Xm' 같은 괄호 내 부가 정보는 제거 후 파싱
-        ─ 범위 표현(A ~ B)이면 상한값(B) 반환
-        """
-        # 괄호 안 내용 제거 (예: "(폭 2.6m 이하)" 제거)
-        cleaned = re.sub(r'\(.*?\)', '', wt_str).strip()
+        cleaned = re.sub(r'\(.*?\)', '', str(wt_str)).strip()
         nums = re.findall(r'[\d.]+', cleaned)
-        if not nums:
-            return None
-        return float(nums[-1])   # 범위면 상한값, 단일이면 그 값
+        return float(nums[-1]) if nums else None
 
-    vehicles = []
-    for line in content.split('\n'):
-        parts = [p.strip() for p in line.split('|')]
+    def _build_vehicles(raw_list) -> list:
+        vehicles = []
+        for name, wt_str, length, width in raw_list:
+            is_lowbed = any(kw in name for kw in
+                            ('로브이', 'Low-v', 'Low-bed', '로베드', 'low-bed', 'low-v'))
+            skip_kw = ('높이기준', '특이사항', '톤수', '차량톤수')
+            if any(k in name for k in skip_kw):
+                continue
+            if not name.strip():
+                continue
 
-        # ★ 첫 컬럼이 빈 문자열이면 제거 (Excel 첫 번째 빈 열 대응)
-        if parts and parts[0] == '':
-            parts = parts[1:]
+            max_weight_ton = _parse_max_weight(wt_str)
 
-        if len(parts) < 4:
-            continue
-        name = parts[0]
-        if not name or '톤수' in name or name.startswith('[') or '특이사항' in name or '높이' in name:
-            continue
+            if is_lowbed:
+                vehicles.append({
+                    "name":           name,
+                    "spec":           "높이 2.6m 이상 제품 전용 특수차량",
+                    "max_plt":        999,
+                    "max_weight_ton": max_weight_ton,
+                    "is_lowbed":      True,
+                    "length":         length,
+                    "width":          width,
+                })
+            else:
+                try:
+                    l = float(length)
+                    w = float(width)
+                except Exception:
+                    continue
+                max_plt = _calc_loadable_plt(plt_w, plt_l, w, l)
+                vehicles.append({
+                    "name":           name,
+                    "spec":           f"길이 {l}m / 폭 {w}m",
+                    "max_plt":        max_plt,
+                    "max_weight_ton": max_weight_ton,
+                    "is_lowbed":      False,
+                    "length":         l,
+                    "width":          w,
+                })
+        return vehicles
 
-        is_lowbed = any(kw in name for kw in ('로브이', 'Low-v', 'Low-bed', '로베드', 'low-bed', 'low-v'))
-        if is_lowbed:
-            vehicles.append({
-                "name"          : name,
-                "spec"          : "높이 2.6m 이상 제품 전용 특수차량",
-                "max_plt"       : 999,
-                "max_weight_ton": _parse_max_weight(parts[1]) if len(parts) >= 2 else None,
-                "is_lowbed"     : True,
-                "length"        : 0,
-                "width"         : 0,
-            })
-            continue
+    # ── Qdrant 조회 시도 ───────────────────────────────────────────────
+    content = ""
+    try:
+        client = QdrantClient(url=f"http://{QDRANT_HOST}:{QDRANT_PORT}", api_key=QDRANT_API_KEY)
 
-        try:
-            length = float(re.search(r'([\d.]+)m', parts[2]).group(1))
-            width  = float(re.search(r'([\d.]+)m', parts[3]).group(1))
-        except Exception:
-            continue
+        # 1차: domain=vehicle + type=summary (V5 요약 청크)
+        pts = client.scroll(
+            collection_name="logistics_data",
+            scroll_filter=models.Filter(must=[
+                models.FieldCondition(key="domain", match=models.MatchValue(value="vehicle")),
+                models.FieldCondition(key="type",   match=models.MatchValue(value="summary")),
+            ]),
+            limit=3
+        )[0]
 
-        max_weight_ton = _parse_max_weight(parts[1]) if len(parts) >= 2 else None
-        max_plt = _calc_loadable_plt(plt_w, plt_l, width, length)
+        # 2차: domain=vehicle 전체
+        if not pts:
+            pts = client.scroll(
+                collection_name="logistics_data",
+                scroll_filter=models.Filter(must=[
+                    models.FieldCondition(key="domain", match=models.MatchValue(value="vehicle"))
+                ]),
+                limit=15
+            )[0]
 
-        vehicles.append({
-            "name"          : name,
-            "spec"          : f"길이 {length}m / 폭 {width}m",
-            "max_plt"       : max_plt,
-            "max_weight_ton": max_weight_ton,
-            "is_lowbed"     : False,
-            "length"        : length,
-            "width"         : width,
-        })
+        # 3차: source=차량 데이터
+        if not pts:
+            pts = client.scroll(
+                collection_name="logistics_data",
+                scroll_filter=models.Filter(must=[
+                    models.FieldCondition(key="source", match=models.MatchValue(value="차량 데이터"))
+                ]),
+                limit=15
+            )[0]
+
+        if pts:
+            best = max(pts, key=lambda p: len(p.payload.get("text", p.payload.get("page_content", ""))))
+            content = best.payload.get("text") or best.payload.get("page_content", "")
+
+    except Exception as e:
+        logger.warning(f"차량 데이터 Qdrant 조회 실패 → fallback 사용: {e}")
+
+    # ── content 파싱 ──────────────────────────────────────────────────
+    if content:
+        raw_list = []
+        for line in content.split('\n'):
+            # 마크다운 표 행만 처리 (|---|--- 구분선 제외)
+            if '|' not in line:
+                continue
+            parts = [p.strip() for p in line.strip().strip('|').split('|')]
+            # 빈 첫 컬럼 제거
+            if parts and parts[0] == '':
+                parts = parts[1:]
+            if len(parts) < 4:
+                continue
+            name, wt_str = parts[0], parts[1]
+            # 헤더/구분선/특이사항 행 스킵
+            # Fix: '' 제거 — 모든 문자열은 ''로 시작하므로 전체 차량명이 SKIP되는 버그 수정
+            skip = ('차량톤수', '---', '높이기준', '특이사항')
+            if any(name.startswith(s) for s in skip) or not name:
+                continue
+            # 길이/폭 파싱
+            try:
+                length_m = re.search(r'([\d.]+)', parts[2])
+                width_m  = re.search(r'([\d.]+)', parts[3])
+                if not length_m or not width_m:
+                    continue
+                raw_list.append((name, wt_str, float(length_m.group(1)), float(width_m.group(1))))
+            except Exception:
+                continue
+
+        if raw_list:
+            vehicles = _build_vehicles(raw_list)
+            if vehicles:
+                logger.info(f"차량 후보 {len(vehicles)}개 (Qdrant 파싱)")
+                return vehicles
+
+    # ── fallback: 하드코딩 데이터 사용 ────────────────────────────────
+    logger.warning("차량 데이터 파싱 실패 → 내장 하드코딩 데이터 사용")
+    vehicles = _build_vehicles(FALLBACK_VEHICLES_RAW)
+    logger.info(f"차량 후보 {len(vehicles)}개 (하드코딩 fallback)")
     return vehicles
 
 
@@ -2170,6 +3495,16 @@ def get_split_dispatch_advice(items: list) -> dict:
             [v for v in all_vehicles if not v["is_lowbed"]],
             key=lambda x: (x["max_weight_ton"] or 0, x["max_plt"])
         )
+
+        # 일반 차량이 없으면 전체 사용
+        if not normal_vehicles:
+            normal_vehicles = sorted(
+                all_vehicles,
+                key=lambda x: (x["max_weight_ton"] or 0, x["max_plt"])
+            )
+        if not normal_vehicles:
+            return {"trucks": [], "total_plt": total_plt, "total_weight_kg": total_weight_kg,
+                    "split": False, "error": "사용 가능한 차량이 없습니다."}
 
         def _best_single_vehicle(need_plt: int, need_weight_kg: float) -> Optional[dict]:
             """

@@ -39,3 +39,17 @@ Thumbs.db
 .streamlit/secrets.toml
 migrate_to_cloud.py
 qdrant_storage/
+
+# __pycache__ 및 .pyc 제외
+echo rag_pipeline/__pycache__/ >> .gitignore
+echo "*.pyc" >> .gitignore
+
+# data 폴더 내 Excel, JSON, PDF 제외 (사내 데이터)
+echo "data/processed_chunks.json" >> .gitignore
+echo "data/source_docs/*.xlsx" >> .gitignore
+echo "data/source_docs/*.pdf" >> .gitignore
+echo "rag_pipeline/data/" >> .gitignore
+
+# 백업 폴더 제외
+echo "qdrant_backup/" >> .gitignore
+echo "gitea_data/" >> .gitignore

@@ -3,7 +3,6 @@ from datetime import datetime
 from dotenv import load_dotenv
 import re
 import pandas as pd
-import plotly.express as px
 
 # 팀별 테마 색상 정의
 TEAM_CONFIG = {
@@ -96,73 +95,57 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-# ── 휴지통 버튼 전용 CSS + JS (별도 블록으로 분리)
+# ── 휴지통 버튼 전용 CSS (JS 없이 순수 CSS로 처리)
 st.markdown("""
 <style>
-/* 휴지통 버튼에 동적으로 부여할 클래스 */
-.stDeleteBtn button {
-    background: transparent !important;
-    border: 1px solid rgba(239,68,68,0.35) !important;
-    box-shadow: none !important;
-    border-radius: 6px !important;
-    width: 100% !important;
-    min-height: 36px !important;
-    height: 36px !important;
-    opacity: 0.65 !important;
-    transition: opacity 0.18s ease, transform 0.15s ease !important;
-    color: var(--text-color) !important;
-    /* 이모지가 잘리지 않도록 */
+/* ────────────────────────────────────────────────────────────
+   휴지통 버튼 스타일
+   Streamlit secondary 버튼 중 텍스트가 매우 짧은(이모지 1개) 경우
+   → 컬럼 비율을 충분히 줘서 잘리지 않게 하고
+     버튼 자체도 overflow visible 처리
+──────────────────────────────────────────────────────────── */
+
+/* 모든 secondary 버튼의 p 태그 overflow 기본 허용 */
+div[data-testid="stButton"] button[data-testid="baseButton-secondary"] p {
+    overflow: visible !important;
+    white-space: nowrap !important;
+    line-height: 1.2 !important;
+}
+
+/* 버튼 자체도 overflow 허용 + flex 중앙 정렬 */
+div[data-testid="stButton"] button[data-testid="baseButton-secondary"] {
     overflow: visible !important;
     display: flex !important;
     align-items: center !important;
     justify-content: center !important;
-    padding: 0 4px !important;
 }
-.stDeleteBtn button:hover {
+
+/* dom_del / trk_del / cb_del 버튼:
+   Streamlit은 key를 버튼 부모 div의 data-testid에 노출하지 않지만
+   aria-label(=help 파라미터) 없이 key만 있을 때
+   가장 확실한 방법은 위의 overflow 허용만으로 충분함.
+   추가로 테두리만 살짝 적용 */
+div[data-testid="stHorizontalBlock"] > div:last-child
+    div[data-testid="stButton"] button[data-testid="baseButton-secondary"] {
+    border: 1px solid rgba(239,68,68,0.35) !important;
+    border-radius: 6px !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    opacity: 0.7 !important;
+    transition: opacity 0.15s ease !important;
+}
+div[data-testid="stHorizontalBlock"] > div:last-child
+    div[data-testid="stButton"] button[data-testid="baseButton-secondary"]:hover {
     background: rgba(239,68,68,0.10) !important;
     border-color: rgba(239,68,68,0.7) !important;
     opacity: 1 !important;
-    transform: scale(1.06) !important;
 }
-.stDeleteBtn button:disabled {
+div[data-testid="stHorizontalBlock"] > div:last-child
+    div[data-testid="stButton"] button[data-testid="baseButton-secondary"]:disabled {
     opacity: 0.2 !important;
-    transform: none !important;
     border-color: rgba(128,128,128,0.2) !important;
 }
-/* 이모지 텍스트(<p>) 크기·위치 보정 */
-.stDeleteBtn button p,
-.stDeleteBtn button div {
-    font-size: 16px !important;
-    line-height: 1 !important;
-    margin: 0 !important;
-    padding: 0 !important;
-    overflow: visible !important;
-    /* variation-selector 등 숨겨진 문자 영향 방지 */
-    white-space: nowrap !important;
-}
 </style>
-<script>
-function markDeleteButtons() {
-    document.querySelectorAll('button').forEach(function(btn) {
-        var p = btn.querySelector('p');
-        if (!p) return;
-        // 이모지 코드포인트(U+1F5D1)를 JS 숫자로 직접 비교 — Python 문자열 파싱 영향 없음
-        var text = p.textContent || '';
-        var hasTrash = false;
-        for (var i = 0; i < text.length; i++) {
-            if (text.codePointAt(i) === 0x1F5D1) { hasTrash = true; break; }
-        }
-        if (!hasTrash) return;
-        var wrap = btn.closest('div[data-testid="stButton"]') || btn.parentElement;
-        if (wrap && !wrap.classList.contains('stDeleteBtn')) {
-            wrap.classList.add('stDeleteBtn');
-        }
-    });
-}
-markDeleteButtons();
-var _delObs = new MutationObserver(markDeleteButtons);
-_delObs.observe(document.body, { childList: true, subtree: true });
-</script>
 """, unsafe_allow_html=True)
 
 # --- 시뮬레이터 문의 팝업 ---
@@ -338,7 +321,6 @@ def show_source_popup(sources: list, query: str):
             st.caption(f"🔍 하이라이트 키워드: {' · '.join(keywords) if keywords else '없음'}")
 
 # ── 3D 헬퍼 함수 (전역) ─────────────────────────────────────────────────────
-import plotly.graph_objects as _go3d
 
 def _place_pallets(plt_w, plt_l, car_w, car_l, n_plt):
     """파렛트를 적재함에 배치한 (x,y) 좌표 목록 반환."""
@@ -832,14 +814,23 @@ def show_3d_view_popup(trucks: list, resolved_items: list, mode: str = "truck"):
 
 # RAG 인터페이스 연결
 try:
-    from rag_pipeline.query_processor import get_rag_response, submit_feedback, analyze_logistics_data, analyze_pdf_logistics, get_db_transport_advice, get_split_dispatch_advice, EMAIL_NOTIFIER
+    from rag_pipeline.query_processor import get_rag_response, submit_feedback, analyze_logistics_data, analyze_pdf_logistics, get_db_transport_advice, get_split_dispatch_advice, EMAIL_NOTIFIER, get_freight_meta, calculate_fare_comparison, record_simulator_count, record_doc_click, record_sim_inquiry
     import logging
     logger = logging.getLogger(__name__)
 except ImportError:
-    def get_rag_response(q, context=None): return {"answer": "답변입니다.", "has_table": False}
-    def submit_feedback(q, s, c, src): pass
+    def get_rag_response(q, context=None, team=""): return {"answer": "답변입니다.", "has_table": False}
+    def submit_feedback(q, s, c, src, reason="", team=""): pass
     def get_db_transport_advice(p, w=0): return None
     def get_split_dispatch_advice(items): return {"trucks": [], "total_plt": 0, "total_weight_kg": 0, "split": False, "error": "모듈 미연결"}
+    def get_freight_meta(): return {"loaded": False}
+    def calculate_fare_comparison(dest, weight_kg): return {"직송": None, "화물": None, "택배": None, "추천": None}
+    def record_simulator_count(simulator, team=""): pass
+    def record_doc_click(answer_id): pass
+    def record_sim_inquiry(simulator, team=""): pass
+    def get_direct_fare(origin, dest, vehicle): return None
+    def get_direct_fare_clauses(): return []
+    def get_parcel_fare(region, kind, product, weight_kg): return None
+    def get_freight_meta(): return {}
     class _DummyNotifier:
         enabled = False
         def send_improvement_request(self, content, team): return False
@@ -1348,8 +1339,12 @@ def process_user_query(query):
 
     try:
         # 4. 답변 생성 (백그라운드)
-        response    = get_rag_response(query, context=curr_conv.get("context", []))
-        answer_text = response.get('answer', "")
+        response    = get_rag_response(query, context=curr_conv.get("context", []), team=st.session_state.get("selected_team", ""))
+        answer_text = response.get('answer', "").strip()
+
+        # 빈 답변 방어 처리 — LLM이 빈 문자열 반환 시 안내 메시지로 대체
+        if not answer_text:
+            answer_text = "죄송합니다. 답변 생성 중 문제가 발생했습니다. 같은 질문을 다시 시도하거나, 질문을 조금 다르게 표현해 주세요."
 
         # Skeleton 제거
         skeleton_slot.empty()
@@ -1374,13 +1369,14 @@ def process_user_query(query):
         # 최종 완성본으로 교체
         stream_slot.empty()
 
-        # 5. 메시지 저장
+        # 5. 메시지 저장 (rerun 전에 반드시 완료)
         curr_conv["messages"].append({
             "role"      : "assistant",
             "content"   : answer_text,
             "sources"   : response.get('sources', []),
             "timestamp" : datetime.now().isoformat(),
-            "has_table" : response.get('has_table', False)
+            "has_table" : response.get('has_table', False),
+            "answer_id" : response.get('answer_id', ""),
         })
 
         # 6. 대화 컨텍스트 누적 (최대 10턴)
@@ -1536,12 +1532,14 @@ with st.sidebar:
         """
         import glob as _glob, re as _re
 
+        import os as _os
+        _env_path = _os.environ.get("LOGIBOT_EXCEL_PATH", "")
         search_paths = (
-            _glob.glob("data/source_docs/*V4*.xlsx") +
-            _glob.glob("data/source_docs/*V3*.xlsx") +
-            _glob.glob("data/source_docs/*.xlsx") +
-            _glob.glob("/mnt/user-data/uploads/*V4*.xlsx") +
-            _glob.glob("/mnt/user-data/uploads/*.xlsx")
+            ([_env_path] if _env_path and _glob.glob(_env_path) else []) +
+            _glob.glob("rag_pipeline/data/source_docs/*V5*.xlsx") +
+            _glob.glob("rag_pipeline/data/source_docs/*V4*.xlsx") +
+            _glob.glob("rag_pipeline/data/source_docs/*V3*.xlsx") +
+            _glob.glob("rag_pipeline/data/source_docs/*.xlsx")
         )
 
         df = None
@@ -1666,7 +1664,8 @@ with st.sidebar:
 
         with st.container(border=True):
             total_target_weight = st.number_input(
-                "목표 총 중량 (kg)", min_value=0.0, value=800.0, step=10.0
+                "목표 총 중량 (kg)", min_value=0.0, value=800.0, step=10.0,
+                on_change=lambda: st.session_state.update({"export_sim_run": False})
             )
             selected_packing = st.selectbox(
                 "포장재 종류",
@@ -1674,13 +1673,15 @@ with st.sidebar:
                     "제품-650박스","제품-1090박스","제품-세미박스",
                     "제품-마대","제품-600박스",
                     "슬리브-650박스","슬리브-세미박스","슬리브-600박스"
-                ])
+                ]),
+                on_change=lambda: st.session_state.update({"export_sim_run": False})
             )
             # ── 복수 자재그룹 선택 (multiselect) ──────────────────────────
             selected_groups = st.multiselect(
                 "자재그룹 (복수 선택 가능)",
                 options=GROUP_LIST or ["B01","B02","N18","N19"],
-                placeholder="자재그룹을 선택하세요 (여러 개 선택 가능)"
+                placeholder="자재그룹을 선택하세요 (여러 개 선택 가능)",
+                on_change=lambda: st.session_state.update({"export_sim_run": False})
             )
 
             # 복수 선택 시 그룹별 중량 비율 입력
@@ -1730,8 +1731,23 @@ with st.sidebar:
             elif len(selected_groups) == 1:
                 group_weights[selected_groups[0]] = total_target_weight
 
+        # ── 조회 버튼 ────────────────────────────────────────────────────
+        if "export_sim_run" not in st.session_state:
+            st.session_state.export_sim_run = False
+
+        if st.button("🔍 포장량 계산", use_container_width=True, key="export_run_btn"):
+            st.session_state.export_sim_run = True
+            record_simulator_count("수출포장량", team=st.session_state.get("selected_team", ""))
+
         # ── 계산 시작 ────────────────────────────────────────────────────
-        if selected_groups and selected_packing != "선택하세요":
+        if not (selected_groups and selected_packing != "선택하세요"):
+            if not selected_groups:
+                st.info("자재그룹과 포장재 종류를 선택 후 **포장량 계산** 버튼을 눌러주세요.")
+            elif selected_packing == "선택하세요":
+                st.info("포장재 종류를 선택 후 **포장량 계산** 버튼을 눌러주세요.")
+        elif not st.session_state.export_sim_run:
+            st.info("⬆️ 수치를 입력 후 **포장량 계산** 버튼을 눌러주세요.")
+        else:
 
             st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">📊 시뮬레이션 결과</div>', unsafe_allow_html=True)
 
@@ -1971,6 +1987,7 @@ with st.sidebar:
                             f"목표 중량: {total_target_weight:,.0f}kg\n"
                             f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT"
                         )
+                        record_sim_inquiry("수출포장량", team=st.session_state.get("selected_team", ""))
                         show_simulator_inquiry_popup("수출 포장량 시뮬레이터", sim_summary)
             else:
                 # 컨테이너 2대 이상: 각 컨테이너별 3D 버튼 행
@@ -2016,9 +2033,9 @@ with st.sidebar:
                         f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT\n"
                         f"컨테이너: {_cntr_type} {len(_cntr_list)}대"
                     )
+                    record_sim_inquiry("수출포장량", team=st.session_state.get("selected_team", ""))
                     show_simulator_inquiry_popup("수출 포장량 시뮬레이터", sim_summary)
-        else:
-            st.info("자재그룹과 포장재를 선택하시면 시뮬레이션이 시작됩니다.")
+
 
     elif current_team == "국내영업팀":
         st.markdown(
@@ -2027,192 +2044,84 @@ with st.sidebar:
             unsafe_allow_html=True
         )
 
-        # ── 노선 데이터 로드 ───────────────────────────────────────────────
         @st.cache_data(ttl=300)
-        def load_route_data():
-            """V3 기준: 시트명='차량 노선 데이터', 도착지='부산(경남권)' 형식"""
-            SHEET = "차량 노선 데이터"
-            # 1순위: 실제 운영 경로
-            search_paths = (
-                glob.glob("data/source_docs/*V3*.xlsx") +
-                glob.glob("data/source_docs/*.xlsx") +
-                glob.glob("/mnt/user-data/uploads/*V3*.xlsx") +
-                glob.glob("/mnt/user-data/uploads/*.xlsx")
-            )
-            df = None
-            for path in search_paths:
-                try:
-                    xf = pd.ExcelFile(path)
-                    # 시트명 자동 탐지 (노선 관련)
-                    route_sheet = next(
-                        (s for s in xf.sheet_names if "노선" in s),
-                        None
-                    )
-                    if route_sheet:
-                        df = pd.read_excel(path, sheet_name=route_sheet).fillna("")
-                        break
-                except Exception:
-                    continue
-            if df is None:
-                return set(), set()
+        def _check_fare_loaded():
+            return get_freight_meta().get("loaded", False)
 
-            short_set = set(df[df["거리 기준"] == "단거리"]["도착지"].str.strip().tolist())
-            long_set  = set(df[df["거리 기준"] == "장거리"]["도착지"].str.strip().tolist())
-            return short_set, long_set
+        fare_loaded = _check_fare_loaded()
 
-        import glob as glob  # 함수 안에서도 사용 가능하도록
-        SHORT_DEST, LONG_DEST = load_route_data()
+        if not fare_loaded:
+            st.warning("⚠️ 운임 데이터가 Qdrant에 없습니다. data_loader.py로 운임_테이블.xlsx를 재적재해주세요.")
+        else:
+            with st.container(border=True):
+                destination = st.text_input("📍 도착지", placeholder="예: 창원, 광주, 서울, 인천", key="fare_dest")
+                weight_kg   = st.number_input("⚖️ 중량 (kg)", min_value=1, value=100, key="fare_weight")
+                search_btn  = st.button("🔍 운임 조회", use_container_width=True, key="fare_search_btn")
 
-        # ── 지역 → 구간 분류 (3구간) ─────────────────────────────────────
-        # 구간 A: 녹산/대저/명지/경남권  → 300kg 기준
-        # 구간 B: 부산시내              → 150kg 기준
-        # 구간 C: 이외 장거리           → 800kg 기준
-        ZONE_A_KEYWORDS = ["녹산", "대저", "명지", "경남", "양산", "창원", "마산", "진주", "거제", "통영", "사천", "밀양", "함안", "거창", "합천", "의령", "남해", "하동", "산청", "함양", "고성", "창녕"]
-        ZONE_B_KEYWORDS = ["부산", "해운대", "동래", "사상", "사하", "강서", "금정", "북구", "동구", "서구", "중구", "영도", "연제", "수영", "남구", "기장"]
+            if search_btn and not destination:
+                st.warning("도착지를 입력해주세요.")
 
-        def classify_zone(dest: str):
-            """
-            입력 도착지 → (zone, threshold, label) 반환
-            zone A: 녹산/대저/명지/경남권 — 300kg
-            zone B: 부산시내              — 150kg
-            zone C: 장거리                — 800kg
-            """
-            dest_lower = dest.strip()
-            # Zone A 우선 (경남권 키워드)
-            for kw in ZONE_A_KEYWORDS:
-                if kw in dest_lower:
-                    return "A", 300, "녹산·대저·명지·경남권"
-            # Zone B (부산 키워드) — 단, 경남 이미 매칭된 경우 제외
-            for kw in ZONE_B_KEYWORDS:
-                if kw in dest_lower:
-                    return "B", 150, "부산시내"
-            # Zone C: DB 장거리 or 기본 장거리
-            return "C", 800, "장거리"
+            if search_btn and destination:
+                record_simulator_count("국내운임비교", team=st.session_state.get("selected_team", ""))
+                with st.spinner("운임 계산 중..."):
+                    fare_result = calculate_fare_comparison(destination, weight_kg)
 
-        # ── 입력 폼 ────────────────────────────────────────────────────────
-        with st.container(border=True):
-            destination  = st.text_input("📍 도착 지역", placeholder="예: 부산, 창원, 서울, 광주")
-            total_weight = st.number_input("⚖️ 총 중량 (kg)", min_value=1, value=100)
+                best  = fare_result.get("추천")
+                icon_map  = {"직송": "🚛", "화물": "📦", "택배": "🏍️"}
+                color_map = {"직송": "#2563eb", "화물": "#16a34a", "택배": "#f59e0b"}
 
-        # ── 분석 ───────────────────────────────────────────────────────────
-        if destination:
-            zone, threshold, zone_label = classify_zone(destination)
-            is_direct = total_weight > threshold
-            best_option = "직송" if is_direct else "화물/택배"
-
-            # ── 결과 UI ───────────────────────────────────────────────────
-            # 색상 팔레트
-            if is_direct:
-                accent      = "#2563eb"   # 파랑 — 직송
-                accent_light= "#dbeafe"
-                result_icon = "🚛"
-            else:
-                accent      = "#16a34a"   # 초록 — 화물/택배
-                accent_light= "#dcfce7"
-                result_icon = "📦"
-
-            zone_colors = {"A": ("#f59e0b", "#fef3c7"), "B": ("#8b5cf6", "#ede9fe"), "C": ("#64748b", "#f1f5f9")}
-            zc, zc_light = zone_colors[zone]
-
-            st.markdown(f"""
-<style>
-.fare-result-wrap{{margin-top:4px;}}
-.fare-hero{{
-  background:linear-gradient(135deg,{accent}ee,{accent}bb);
-  border-radius:14px;padding:16px 18px;margin-bottom:10px;
-  display:flex;align-items:center;gap:12px;
-}}
-.fare-hero-icon{{font-size:28px;line-height:1;}}
-.fare-hero-text{{color:#fff;}}
-.fare-hero-label{{font-size:11px;opacity:.85;letter-spacing:.5px;text-transform:uppercase;}}
-.fare-hero-value{{font-size:22px;font-weight:800;line-height:1.2;}}
-.fare-row{{display:flex;gap:8px;margin-bottom:8px;}}
-.fare-chip{{
-  flex:1;border-radius:10px;padding:10px 12px;
-  background:var(--secondary-background-color);
-}}
-.fare-chip-label{{font-size:11px;color:#888;margin-bottom:3px;}}
-.fare-chip-value{{font-size:14px;font-weight:700;}}
-.fare-zone-badge{{
-  display:inline-block;padding:2px 10px;border-radius:20px;
-  font-size:11px;font-weight:700;
-  background:{zc_light};color:{zc};
-}}
-.fare-divider{{border:none;border-top:1px solid var(--secondary-background-color);margin:10px 0;}}
-</style>
-<div class="fare-result-wrap">
-  <div class="fare-hero">
-    <div class="fare-hero-icon">{result_icon}</div>
-    <div class="fare-hero-text">
-      <div class="fare-hero-label">추천 운임 방법</div>
-      <div class="fare-hero-value">{best_option}</div>
-    </div>
-  </div>
-  <div class="fare-row">
-    <div class="fare-chip">
-      <div class="fare-chip-label">도착 지역</div>
-      <div class="fare-chip-value">{destination} <span class="fare-zone-badge">{zone_label}</span></div>
-    </div>
-  </div>
-  <div class="fare-row">
-    <div class="fare-chip">
-      <div class="fare-chip-label">총 중량</div>
-      <div class="fare-chip-value">{total_weight:,} kg</div>
-    </div>
-    <div class="fare-chip">
-      <div class="fare-chip-label">판단 기준</div>
-      <div class="fare-chip-value">{threshold:,} kg {'초과 → 직송' if is_direct else '이하 → 화물/택배'}</div>
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-            # 기준표 expander — 3구간 카드
-            with st.expander("📋 운임 선택 기준 전체 보기"):
                 st.markdown(f"""
 <style>
-.zone-card{{border-radius:10px;padding:11px 14px;margin-bottom:8px;border-left:4px solid;background:var(--secondary-background-color);}}
-.zone-a{{border-color:#f59e0b;}}
-.zone-b{{border-color:#8b5cf6;}}
-.zone-c{{border-color:#64748b;}}
-.zone-title{{font-size:12px;font-weight:700;margin-bottom:5px;color:var(--text-color);}}
-.zone-row{{font-size:12px;line-height:1.8;color:var(--text-color);}}
-.tag{{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700;}}
-.tag-d{{background:rgba(37,99,235,0.15);color:#2563eb;border:1px solid rgba(37,99,235,0.3);}}
-.tag-c{{background:rgba(22,163,74,0.15);color:#16a34a;border:1px solid rgba(22,163,74,0.3);}}
-</style>
-<div class="zone-card zone-a">
-  <div class="zone-title">🟡 녹산·대저·명지·경남권</div>
-  <div class="zone-row">
-    300 kg 이하 → <span class="tag tag-c">화물/택배</span><br>
-    300 kg 초과 → <span class="tag tag-d">직송</span>
-  </div>
-</div>
-<div class="zone-card zone-b">
-  <div class="zone-title">🟣 부산시내</div>
-  <div class="zone-row">
-    150 kg 이하 → <span class="tag tag-c">화물/택배</span><br>
-    150 kg 초과 → <span class="tag tag-d">직송</span>
-  </div>
-</div>
-<div class="zone-card zone-c">
-  <div class="zone-title">⚫ 이외 장거리</div>
-  <div class="zone-row">
-    800 kg 이하 → <span class="tag tag-c">화물/택배</span><br>
-    800 kg 초과 → <span class="tag tag-d">직송</span>
-  </div>
-</div>
-<div style="font-size:11px;color:#999;margin-top:4px;">※ 기준: 물류팀 운영 규칙</div>
-""", unsafe_allow_html=True)
+.fare-hero{{
+  border-radius:16px;padding:28px 20px;margin:10px 0;text-align:center;
+  background:linear-gradient(135deg,{color_map.get(best,'#64748b')}dd,{color_map.get(best,'#64748b')}88);
+}}
+.fare-hero-icon{{font-size:52px;line-height:1;margin-bottom:10px;}}
+.fare-hero-label{{font-size:11px;color:rgba(255,255,255,0.8);letter-spacing:1px;margin-bottom:4px;}}
+.fare-hero-value{{font-size:40px;font-weight:900;color:#fff;line-height:1.2;}}
+.fare-hero-sub{{font-size:12px;color:rgba(255,255,255,0.75);margin-top:8px;}}
+</style>""", unsafe_allow_html=True)
 
-            if st.button("📋 시뮬레이터 문의하기", use_container_width=True):
-                sim_summary = (
-                    f"도착지: {destination} ({zone_label})\n"
-                    f"총 중량: {total_weight:,}kg\n"
-                    f"기준 중량: {threshold:,}kg\n"
-                    f"추천 운송 방식: {best_option}"
-                )
-                show_simulator_inquiry_popup("국내 최적 운임 비교", sim_summary)
+                if best:
+                    direct = fare_result.get("직송")
+                    sub_parts = [destination, f"{weight_kg:,}kg"]
+                    if direct and direct.get("장거리"):
+                        sub_parts.append("장거리 20% 가산 적용")
+                    if direct and direct.get("차종"):
+                        sub_parts.append(f"차종: {direct['차종']}")
+                    st.markdown(f"""
+<div class="fare-hero">
+  <div class="fare-hero-icon">{icon_map[best]}</div>
+  <div class="fare-hero-label">추천 운송 방식</div>
+  <div class="fare-hero-value">{best}</div>
+  <div class="fare-hero-sub">{' · '.join(sub_parts)}</div>
+</div>""", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+<div class="fare-hero" style="background:linear-gradient(135deg,#64748bdd,#64748b88);">
+  <div class="fare-hero-icon">❓</div>
+  <div class="fare-hero-label">운임 조회 결과</div>
+  <div class="fare-hero-value">데이터 없음</div>
+  <div class="fare-hero-sub">{destination} · 도착지를 다시 확인해주세요</div>
+</div>""", unsafe_allow_html=True)
+
+                if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="fare_inquiry_btn"):
+                    direct  = fare_result.get("직송")
+                    cargo   = fare_result.get("화물")
+                    parcel  = fare_result.get("택배")
+                    lines   = [
+                        f"도착지: {destination} / 중량: {weight_kg:,}kg",
+                        f"추천: {best or '없음'}",
+                    ]
+                    if direct:
+                        lines.append(f"직송 - 차종:{direct.get('차종')} / 권역:{direct.get('권역')} / {'장거리20%↑' if direct.get('장거리') else '단거리'}")
+                    if cargo:
+                        lines.append(f"화물 - 단가:{cargo.get('단가',0):,}원/kg")
+                    if parcel:
+                        lines.append(f"택배 - 단가:{parcel.get('단가',0):,}원/kg")
+                    record_sim_inquiry("국내운임비교", team=st.session_state.get("selected_team", ""))
+                    show_simulator_inquiry_popup("국내 최적 운임 비교", "\n".join(lines))
+
 
         # ── 국내 최적 배차 시뮬레이터 (국내영업팀 전용) ─────────────────────
         st.markdown(
@@ -2224,13 +2133,15 @@ with st.sidebar:
         # ── 공통 데이터 로드 ────────────────────────────────────────────────
         @st.cache_data(ttl=300)
         def load_crawler_data_dom():
-            import glob as _glob
+            import glob as _glob, os as _os
             CRAWLER_SHEET_KEYWORD = "크롤러"
+            _env_path = _os.environ.get("LOGIBOT_EXCEL_PATH", "")
             search_paths = (
-                _glob.glob("data/source_docs/*V4*.xlsx") +
-                _glob.glob("data/source_docs/*V3*.xlsx") +
-                _glob.glob("data/source_docs/*.xlsx") +
-                _glob.glob("/mnt/user-data/uploads/*V4*.xlsx") +
+                ([_env_path] if _env_path and _glob.glob(_env_path) else []) +
+                _glob.glob("rag_pipeline/data/source_docs/*V5*.xlsx") +
+                _glob.glob("rag_pipeline/data/source_docs/*V4*.xlsx") +
+                _glob.glob("rag_pipeline/data/source_docs/*V3*.xlsx") +
+                _glob.glob("rag_pipeline/data/source_docs/*.xlsx") +
                 _glob.glob("/mnt/user-data/uploads/*.xlsx")
             )
             df = None
@@ -2544,7 +2455,7 @@ with st.sidebar:
         with st.container(border=True):
             st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">📦 자재 입력</div>', unsafe_allow_html=True)
             for i, row_item in enumerate(st.session_state.dom_sim_items):
-                col_code, col_qty, col_del = st.columns([3, 2, 0.65])
+                col_code, col_qty, col_del = st.columns([3, 2, 1.2])
                 with col_code:
                     new_code = st.text_input(
                         f"자재코드 {i+1}", value=row_item["code"],
@@ -2560,17 +2471,26 @@ with st.sidebar:
                     )
                     st.session_state.dom_sim_items[i]["qty"] = new_qty
                 with col_del:
-                    st.markdown("<div style='margin-top:26px;overflow:visible;'>", unsafe_allow_html=True)
+                    st.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
                     if st.button("🗑️", key=f"dom_del_{i}",
                                  disabled=len(st.session_state.dom_sim_items) == 1,
                                  use_container_width=True):
                         _del_dom_item(i)
+                        st.session_state.dom_sim_run = False  # 삭제 시 결과 초기화
                         st.rerun()
-                    st.markdown("</div>", unsafe_allow_html=True)
 
             if st.button("자재 추가 (혼적)", use_container_width=True, key="dom_add_item"):
                 _add_dom_item()
+                st.session_state.dom_sim_run = False  # 자재 추가 시 결과 초기화
                 st.rerun()
+
+        # ── 조회 버튼 ────────────────────────────────────────────────────────
+        if "dom_sim_run" not in st.session_state:
+            st.session_state.dom_sim_run = False
+
+        if st.button("🔍 배차 조회", use_container_width=True, key="dom_run_btn"):
+            st.session_state.dom_sim_run = True
+            record_simulator_count("국내최적배차", team=st.session_state.get("selected_team", ""))
 
         # ── 계산 실행 ────────────────────────────────────────────────────────
         active_items = [
@@ -2579,6 +2499,8 @@ with st.sidebar:
 
         if not active_items:
             st.info("자재코드와 수량을 입력하시면 DB 기반으로 최적 차량을 분석합니다.")
+        elif not st.session_state.dom_sim_run:
+            st.info("⬆️ 자재코드와 수량을 입력 후 **배차 조회** 버튼을 눌러주세요.")
         else:
             # 자재별 조회 및 검증
             resolved, errors = [], []
@@ -2733,6 +2655,7 @@ with st.sidebar:
                             f"[합계] {total_plt_all}PLT / {total_wkg_all/1000:.2f}ton\n"
                             f"[배차]\n{truck_lines}"
                         )
+                        record_sim_inquiry("국내최적배차", team=st.session_state.get("selected_team", ""))
                         show_simulator_inquiry_popup("국내 최적 배차 시뮬레이터", sim_summary)
 
 
@@ -2749,12 +2672,13 @@ with st.sidebar:
         # ── 컨베어벨트 DB 로드 ────────────────────────────────────────────
         @st.cache_data(ttl=300)
         def load_cb_data():
-            import glob as _glob, math as _math
+            import glob as _glob, math as _math, os as _os
+            _env_path = _os.environ.get("LOGIBOT_EXCEL_PATH", "")
             search_paths = (
-                _glob.glob("data/source_docs/*V4*.xlsx") +
-                _glob.glob("data/source_docs/*.xlsx") +
-                _glob.glob("/mnt/user-data/uploads/*V4*.xlsx") +
-                _glob.glob("/mnt/user-data/uploads/*.xlsx")
+                ([_env_path] if _env_path and _glob.glob(_env_path) else []) +
+                _glob.glob("rag_pipeline/data/source_docs/*V5*.xlsx") +
+                _glob.glob("rag_pipeline/data/source_docs/*V4*.xlsx") +
+                _glob.glob("rag_pipeline/data/source_docs/*.xlsx")
             )
             for path in search_paths:
                 try:
@@ -2853,7 +2777,8 @@ with st.sidebar:
                     st.session_state.cb_sim_items.pop(i)
 
             for i, cb_row in enumerate(st.session_state.cb_sim_items):
-                c1, c2, c3, c4 = st.columns([3, 2, 1.5, 0.7])
+                # 1행: 자재코드 / 길이
+                c1, c2 = st.columns([3, 2])
                 with c1:
                     new_code = st.text_input(f"자재코드 {i+1}", value=cb_row["code"],
                         placeholder="예: 6015628", key=f"cb_code_{i}"
@@ -2863,25 +2788,40 @@ with st.sidebar:
                     new_len = st.number_input(f"길이(m) {i+1}", min_value=0.1, value=float(cb_row["length"]),
                         step=10.0, key=f"cb_len_{i}")
                     st.session_state.cb_sim_items[i]["length"] = new_len
+                # 2행: 롤 수 / 삭제 버튼
+                c3, c4 = st.columns([4, 1.2])
                 with c3:
                     new_rolls = st.number_input(f"롤 수 {i+1}", min_value=1, value=int(cb_row["rolls"]),
                         step=1, key=f"cb_rolls_{i}")
                     st.session_state.cb_sim_items[i]["rolls"] = new_rolls
                 with c4:
-                    st.markdown("<div style='margin-top:26px;overflow:visible;'>", unsafe_allow_html=True)
+                    st.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
                     if st.button("🗑️", key=f"cb_del_{i}",
                                  disabled=len(st.session_state.cb_sim_items)==1,
                                  use_container_width=True):
-                        _del_cb(i); st.rerun()
-                    st.markdown("</div>", unsafe_allow_html=True)
+                        _del_cb(i)
+                        st.session_state.cb_sim_run = False  # 삭제 시 결과 초기화
+                        st.rerun()
 
-            if st.button("➕ 롤 추가", use_container_width=True, key="cb_add"):
-                _add_cb(); st.rerun()
+            if st.button("롤 추가", use_container_width=True, key="cb_add"):
+                _add_cb()
+                st.session_state.cb_sim_run = False  # 롤 추가 시 결과 초기화
+                st.rerun()
+
+        # ── 조회 버튼 ─────────────────────────────────────────────────────
+        if "cb_sim_run" not in st.session_state:
+            st.session_state.cb_sim_run = False
+
+        if st.button("🔍 롤 직경 / 배차 조회", use_container_width=True, key="cb_run_btn"):
+            st.session_state.cb_sim_run = True
+            record_simulator_count("컨베어벨트배차", team=st.session_state.get("selected_team", ""))
 
         # ── 계산 ─────────────────────────────────────────────────────────
         cb_active = [it for it in st.session_state.cb_sim_items if it["code"].strip()]
         if not cb_active:
             st.info("자재코드, 길이(m), 롤 수를 입력하면 롤 직경과 적합 차량을 계산합니다.")
+        elif not st.session_state.cb_sim_run:
+            st.info("⬆️ 자재코드와 수치를 입력 후 **롤 직경 / 배차 조회** 버튼을 눌러주세요.")
         else:
             cb_resolved, cb_errors = [], []
             for it in cb_active:
@@ -3205,15 +3145,17 @@ with st.sidebar:
               - 헤더:   1행 (0행은 섹션 제목 '[크롤러 러버트랙 자재 데이터]')
             파일/시트명이 달라져도 자동 탐지
             """
-            import glob as _glob
+            import glob as _glob, os as _os
 
             CRAWLER_SHEET_KEYWORD = "크롤러"
 
+            _env_path = _os.environ.get("LOGIBOT_EXCEL_PATH", "")
             search_paths = (
-                _glob.glob("data/source_docs/*V3*.xlsx") +
-                _glob.glob("data/source_docs/*.xlsx") +
-                _glob.glob("/mnt/user-data/uploads/*V3*.xlsx") +
-                _glob.glob("/mnt/user-data/uploads/*.xlsx")
+                ([_env_path] if _env_path and _glob.glob(_env_path) else []) +
+                _glob.glob("rag_pipeline/data/source_docs/*V5*.xlsx") +
+                _glob.glob("rag_pipeline/data/source_docs/*V4*.xlsx") +
+                _glob.glob("rag_pipeline/data/source_docs/*V3*.xlsx") +
+                _glob.glob("rag_pipeline/data/source_docs/*.xlsx")
             )
 
             df = None
@@ -3300,7 +3242,7 @@ with st.sidebar:
         with st.container(border=True):
             st.markdown('<div style="font-size:14px;font-weight:600;color:var(--text-color);margin:10px 0 6px 0;opacity:0.9;">📦 자재 입력</div>', unsafe_allow_html=True)
             for i, row_item in enumerate(st.session_state.trk_sim_items):
-                col_code, col_qty, col_del = st.columns([3, 2, 0.65])
+                col_code, col_qty, col_del = st.columns([3, 2, 1.2])
                 with col_code:
                     new_code = st.text_input(
                         f"자재코드 {i+1}", value=row_item["code"],
@@ -3316,23 +3258,34 @@ with st.sidebar:
                     )
                     st.session_state.trk_sim_items[i]["qty"] = new_qty
                 with col_del:
-                    st.markdown("<div style='margin-top:26px;overflow:visible;'>", unsafe_allow_html=True)
+                    st.markdown('<div style="height:28px"></div>', unsafe_allow_html=True)
                     if st.button("🗑️", key=f"trk_del_{i}",
                                  disabled=len(st.session_state.trk_sim_items) == 1,
                                  use_container_width=True):
                         _del_trk_item(i)
+                        st.session_state.trk_sim_run = False  # 삭제 시 결과 초기화
                         st.rerun()
-                    st.markdown("</div>", unsafe_allow_html=True)
 
             if st.button("자재 추가 (혼적)", use_container_width=True, key="trk_add_item"):
                 _add_trk_item()
+                st.session_state.trk_sim_run = False  # 자재 추가 시 결과 초기화
                 st.rerun()
+
+        # ── 조회 버튼 ────────────────────────────────────────────────────────
+        if "trk_sim_run" not in st.session_state:
+            st.session_state.trk_sim_run = False
+
+        if st.button("🔍 배차 조회", use_container_width=True, key="trk_run_btn"):
+            st.session_state.trk_sim_run = True
+            record_simulator_count("크롤러배차", team=st.session_state.get("selected_team", ""))
 
         # ── 계산 실행 ────────────────────────────────────────────────────────
         trk_active = [it for it in st.session_state.trk_sim_items if it["code"].strip()]
 
         if not trk_active:
             st.info("자재코드와 수량을 입력하시면 DB 기반으로 최적 차량을 분석합니다.")
+        elif not st.session_state.trk_sim_run:
+            st.info("⬆️ 자재코드와 수량을 입력 후 **배차 조회** 버튼을 눌러주세요.")
         else:
             resolved_trk, errors_trk = [], []
             for it in trk_active:
@@ -3610,6 +3563,7 @@ with st.sidebar:
                             f"[합계] {total_plt_trk}PLT / {total_wkg_trk/1000:.2f}ton\n"
                             f"[배차]\n{truck_lines_t}"
                         )
+                        record_sim_inquiry("크롤러배차", team=st.session_state.get("selected_team", ""))
                         show_simulator_inquiry_popup("크롤러 배차 시뮬레이터", sim_summary_t)
                        
 # ── 개선 요청 버튼 & 팝업 ────────────────────────────────────────────────
@@ -3674,6 +3628,340 @@ if st.session_state.show_improve_form:
                 st.rerun()
 
 st.title("📦 DRB LOGIBOT-AI")
+
+# ═══════════════════════════════════════════════════════════════
+# 📰 실시간 뉴스 티커 (브라우저 JS fetch + URL 동적 조립)
+# ═══════════════════════════════════════════════════════════════
+import streamlit.components.v1 as _components
+import json as _json
+
+# 팀별 설정: JS에서 encodeURIComponent로 URL 조립하므로 쿼리는 원문 그대로
+_NEWS_CFG = {
+    "국내영업팀": {
+        "label": "🚚 국내 물류 뉴스",
+        "color": "#007BFF",
+        "queries": [
+            # ── 구글뉴스 (단순 키워드) ──────────────────────────────────
+            {"q": "물류",           "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "운임",           "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "택배",           "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "화물",           "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "배송",           "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "물류센터",       "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "공급망",         "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "항만",           "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            # ── 전문 RSS (직접 피드) ────────────────────────────────────
+            {"url": "https://www.klnews.co.kr/rss/allArticle.xml",  "type": "rss", "label": "국토물류신문"},
+            {"url": "https://www.transportnews.co.kr/rss/allArticle.xml", "type": "rss", "label": "교통신문"},
+        ],
+    },
+    "해외영업팀": {
+        "label": "🚢 해외 물류·국제정세 뉴스",
+        "color": "#FF8C00",
+        "queries": [
+            # ── 구글뉴스 (단순 키워드) ──────────────────────────────────
+            {"q": "해상운임",       "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "컨테이너",       "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "수출입",         "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "관세",           "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "무역",           "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "선박",           "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "공급망",         "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "홍해",           "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            # ── 영문 구글뉴스 ───────────────────────────────────────────
+            {"q": "shipping freight", "hl": "en", "gl": "US", "ceid": "US:en", "type": "google"},
+            {"q": "container rates",  "hl": "en", "gl": "US", "ceid": "US:en", "type": "google"},
+            # ── 전문 RSS (직접 피드) ────────────────────────────────────
+            {"url": "https://www.klnews.co.kr/rss/allArticle.xml",  "type": "rss", "label": "국토물류신문"},
+        ],
+    },
+    "트랙영업팀": {
+        "label": "🚜 건설기계 뉴스",
+        "color": "#28A745",
+        "queries": [
+            # ── 구글뉴스 (단순 키워드) ──────────────────────────────────
+            {"q": "건설기계",       "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "굴삭기",         "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "크롤러",         "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "중장비",         "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "건설장비",       "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            {"q": "컨베어벨트",     "hl": "ko", "gl": "KR", "ceid": "KR:ko", "type": "google"},
+            # ── 전문 RSS (직접 피드) ────────────────────────────────────
+            {"url": "https://www.cmnews.co.kr/rss/allArticle.xml",  "type": "rss", "label": "CM건설기계신문"},
+        ],
+    },
+}
+
+def render_news_ticker(team: str):
+    cfg = _NEWS_CFG.get(team)
+    if not cfg:
+        return
+
+    label = cfg["label"]
+    color = cfg["color"]
+    queries_json = _json.dumps(cfg["queries"], ensure_ascii=False)
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{ background:transparent; font-family:'Malgun Gothic',-apple-system,sans-serif; overflow:hidden; }}
+  .wrap {{
+    display:flex; align-items:center;
+    background:rgba(40,40,40,0.55);
+    border:1px solid rgba(128,128,128,0.25);
+    border-radius:10px; overflow:hidden;
+    height:40px;
+  }}
+  .lbl {{
+    flex-shrink:0; background:{color};
+    color:#fff; font-size:11px; font-weight:700;
+    padding:0 12px; height:40px;
+    display:flex; align-items:center;
+    white-space:nowrap; border-radius:10px 0 0 10px;
+  }}
+  .body {{ flex:1; overflow:hidden; height:40px; position:relative; min-width:0; }}
+  .ticker-a {{
+    position:absolute; top:50%; left:0; right:0;
+    transform:translateY(-50%);
+    display:block; padding:0 14px;
+    font-size:13px; font-weight:500; color:#e8e8e8;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    text-decoration:none; transition:opacity 0.3s ease;
+  }}
+  .ticker-a:hover {{ color:{color}; text-decoration:underline; }}
+  .nav {{
+    flex-shrink:0; display:flex; align-items:center;
+    padding:0 5px; height:40px;
+    border-left:1px solid rgba(128,128,128,0.2); gap:1px;
+  }}
+  .nav button {{
+    background:transparent; border:none; color:#999;
+    font-size:11px; cursor:pointer; padding:3px 5px;
+    border-radius:4px; transition:all 0.15s;
+  }}
+  .nav button:hover {{ background:rgba(255,255,255,0.1); color:#fff; }}
+  .cnt {{ font-size:10px; color:#777; padding:0 3px; min-width:24px; text-align:center; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="lbl">{label}</div>
+  <div class="body">
+    <a class="ticker-a" id="ta" href="#" target="_blank" rel="noopener noreferrer">뉴스 불러오는 중...</a>
+  </div>
+  <div class="nav">
+    <button onclick="go(-1)">&#9650;</button>
+    <span class="cnt" id="cnt">-</span>
+    <button onclick="go(1)">&#9660;</button>
+  </div>
+</div>
+
+<script>
+var QUERIES = {queries_json};
+var items = [];
+var idx = 0;
+var timer = null;
+var el = document.getElementById('ta');
+var cntEl = document.getElementById('cnt');
+
+// 구글뉴스 RSS URL 조립 (JS encodeURIComponent 사용 → 이중인코딩 없음)
+function buildGoogleRssUrl(qObj) {{
+  return 'https://news.google.com/rss/search?q=' + encodeURIComponent(qObj.q)
+    + '&hl=' + qObj.hl + '&gl=' + qObj.gl + '&ceid=' + encodeURIComponent(qObj.ceid);
+}}
+
+function stripHtml(s) {{
+  return s.replace(/<[^>]+>/g, '').replace(/ +/g, ' ').trim();
+}}
+
+// ── 날짜 파싱: rss2json 형식 + RSS 표준 형식 모두 처리
+// rss2json: "2025-04-21 03:15:00"
+// RSS 표준:  "Mon, 21 Apr 2025 03:15:00 +0000"
+function parseDate(s) {{
+  if (!s) return null;
+  var t = s.trim();
+  // rss2json 형식: "YYYY-MM-DD HH:MM:SS" → T + Z 붙여 UTC 파싱
+  if (/^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}} [0-9]{{2}}:/.test(t)) {{
+    t = t.replace(' ', 'T') + 'Z';
+  }}
+  var d = new Date(t);
+  return isNaN(d.getTime()) ? null : d;
+}}
+
+// 현재 시각 기준 30일 이내 — 파싱 실패 시 true로 처리(기사 포함)
+function isWithin30Days(pubStr) {{
+  var d = parseDate(pubStr);
+  if (!d) return true;
+  return (Date.now() - d.getTime()) <= 30 * 24 * 60 * 60 * 1000;
+}}
+
+// ── rss2json JSON 파싱
+function parseRss2json(data) {{
+  var out = [];
+  if (!data || !data.items) return out;
+  data.items.forEach(function(it) {{
+    if (!isWithin30Days(it.pubDate)) return;
+    var t = stripHtml(it.title || '').replace(/ *- *[^-]*$/, '').trim();
+    if (t.length < 5) return;
+    out.push({{ title: t, link: it.link || it.guid || '#', pub: it.pubDate || '' }});
+  }});
+  return out;
+}}
+
+// ── XML(DOMParser) 파싱 — allorigins / corsproxy 대응
+function parseXml(xmlText) {{
+  var out = [];
+  try {{
+    var doc = new DOMParser().parseFromString(xmlText, 'text/xml');
+    var nodes = doc.querySelectorAll('item');
+    nodes.forEach(function(node) {{
+      var pub = (node.querySelector('pubDate') || {{}}).textContent || '';
+      if (!isWithin30Days(pub)) return;
+      var t = stripHtml((node.querySelector('title') || {{}}).textContent || '');
+      t = t.replace(/ *- *[^-]*$/, '').trim();
+      if (t.length < 5) return;
+      var link = (node.querySelector('link') || {{}}).textContent
+               || (node.querySelector('guid') || {{}}).textContent || '#';
+      // CDATA link 처리
+      if (!link || link.trim() === '') {{
+        var ln = node.getElementsByTagName('link')[0];
+        if (ln) link = ln.textContent || ln.getAttribute('href') || '#';
+      }}
+      out.push({{ title: t, link: link.trim(), pub: pub }});
+    }});
+  }} catch(e) {{}}
+  return out;
+}}
+
+// ── 프록시 fallback 체인
+// 1순위: rss2json (JSON, 빠름)
+// 2순위: allorigins (XML, 안정적)
+// 3순위: corsproxy.io (XML)
+function buildProxies(rssUrl) {{
+  var enc = encodeURIComponent(rssUrl);
+  return [
+    {{
+      url: 'https://api.rss2json.com/v1/api.json?rss_url=' + enc + '&count=30',
+      type: 'json'
+    }},
+    {{
+      url: 'https://api.allorigins.win/raw?url=' + enc,
+      type: 'xml'
+    }},
+    {{
+      url: 'https://corsproxy.io/?' + enc,
+      type: 'xml'
+    }},
+  ];
+}}
+
+// ── 프록시 순차 시도
+function fetchRss(proxies, pi, onSuccess, onFail) {{
+  if (pi >= proxies.length) {{ onFail(); return; }}
+  var p = proxies[pi];
+  fetch(p.url)
+    .then(function(r) {{ return r.ok ? (p.type === 'json' ? r.json() : r.text()) : Promise.reject(r.status); }})
+    .then(function(data) {{
+      var parsed = p.type === 'json' ? parseRss2json(data) : parseXml(data);
+      if (parsed.length > 0) {{ onSuccess(parsed); }}
+      else {{ fetchRss(proxies, pi + 1, onSuccess, onFail); }}
+    }})
+    .catch(function() {{ fetchRss(proxies, pi + 1, onSuccess, onFail); }});
+}}
+
+// ── 중복 제거 후 items에 추가
+function mergeItems(parsed) {{
+  var added = 0;
+  parsed.forEach(function(it) {{
+    if (items.length >= 50) return;  // 최대 50개로 확대
+    var key = it.title.replace(/ /g, '').slice(0, 15);
+    var dup = items.some(function(x) {{ return x.title.replace(/ /g, '').slice(0, 15) === key; }});
+    if (!dup) {{ items.push(it); added++; }}
+  }});
+  return added;
+}}
+
+// ── 쿼리별 순차 로드 (google / rss 타입 분기)
+function tryLoad(qi) {{
+  if (qi >= QUERIES.length) {{
+    if (items.length === 0) el.textContent = '뉴스를 가져올 수 없습니다';
+    return;
+  }}
+  var q = QUERIES[qi];
+
+  // RSS 직접 피드 (전문 언론사)
+  if (q.type === 'rss') {{
+    var enc = encodeURIComponent(q.url);
+    var proxies = [
+      {{ url: 'https://api.rss2json.com/v1/api.json?rss_url=' + enc + '&count=30', type: 'json' }},
+      {{ url: 'https://api.allorigins.win/raw?url=' + enc, type: 'xml' }},
+      {{ url: 'https://corsproxy.io/?' + enc, type: 'xml' }},
+    ];
+    fetchRss(proxies, 0,
+      function(parsed) {{
+        var added = mergeItems(parsed);
+        if (items.length > 0 && qi === 0) {{ show(0); startTimer(); }}
+        else if (added > 0) {{ cntEl.textContent = (idx+1)+'/'+items.length; }}
+        tryLoad(qi + 1);
+      }},
+      function() {{ tryLoad(qi + 1); }}
+    );
+    return;
+  }}
+
+  // 구글뉴스 RSS
+  var rssUrl  = buildGoogleRssUrl(q);
+  var proxies = buildProxies(rssUrl);
+  fetchRss(proxies, 0,
+    function(parsed) {{
+      var added = mergeItems(parsed);
+      if (items.length > 0 && qi === 0) {{ show(0); startTimer(); }}
+      else if (added > 0) {{ cntEl.textContent = (idx+1)+'/'+items.length; }}
+      tryLoad(qi + 1);
+    }},
+    function() {{ tryLoad(qi + 1); }}
+  );
+}}
+
+function show(i) {{
+  if (items.length === 0) return;
+  idx = ((i % items.length) + items.length) % items.length;
+  el.style.opacity = '0';
+  setTimeout(function() {{
+    el.textContent = items[idx].title;
+    el.href = items[idx].link;
+    el.style.opacity = '1';
+    cntEl.textContent = (idx+1) + '/' + items.length;
+  }}, 280);
+}}
+
+function go(dir) {{
+  show(idx + dir);
+  if (timer) clearInterval(timer);
+  startTimer();
+}}
+
+function startTimer() {{
+  if (timer) clearInterval(timer);
+  timer = setInterval(function() {{ show(idx + 1); }}, 5500);
+}}
+
+tryLoad(0);
+</script>
+</body>
+</html>"""
+
+    _components.html(html, height=48, scrolling=False)
+
+
+_ticker_team = st.session_state.get("selected_team", "국내영업팀")
+if _ticker_team in ("국내영업팀", "해외영업팀", "트랙영업팀"):
+    render_news_ticker(_ticker_team)
+
+# ═══════════════════════════════════════════════════════════════
 curr_conv = st.session_state.conversations[st.session_state.current_id]
 
 # --- 추천 질문 표시 (첫 메시지(인사말)만 있을 때) ---
@@ -3698,7 +3986,9 @@ if len(curr_conv["messages"]) == 1 and st.session_state.show_suggestions:
 
 # 메시지 표시
 for idx, msg in enumerate(curr_conv["messages"]):
-    clean_content = re.sub(r'\s?\d\.\d{3}\s?', '', msg["content"]).strip()
+    # ⚠️ 렌더링 시 re.sub 제거 — format_answer(query_processor)에서 이미 처리됨
+    # 이중 적용 시 실제 수치(1.234톤, 0.892 등)까지 삭제되어 답변이 공백이 되는 원인
+    clean_content = msg["content"]
 
     if msg["role"] == "user":
         # ✅ 사용자 질문 버블
@@ -3724,7 +4014,8 @@ for idx, msg in enumerate(curr_conv["messages"]):
                             curr_conv["messages"][idx-1]["content"], 
                             1.0, 
                             msg["content"], 
-                            []
+                            [],
+                            team=st.session_state.get("selected_team", "")
                         )
                         st.session_state.feedback_done.add((st.session_state.current_id, idx))
                         st.toast("긍정적인 피드백 감사합니다!")
@@ -3750,6 +4041,10 @@ for idx, msg in enumerate(curr_conv["messages"]):
                         if prev["role"] == "user":
                             last_user_msg = prev["content"]
                             break
+                    # ④ 참고문서 클릭 카운트
+                    _aid = msg.get("answer_id", "")
+                    if _aid:
+                        record_doc_click(_aid)
                     show_source_popup(sources, last_user_msg)
         
 # --- 대기 중인 질문 처리 ---
