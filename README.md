@@ -1,516 +1,182 @@
-# 📦 DRB LOGIBOT-AI
+# LOGIBOT — DRB 동일고무벨트 물류팀 AI 어시스턴트
 
-> 물류팀을 위한 지능형 RAG 기반 AI 챗봇 시스템
-
-
-## 🌟 주요 기능
-
-- 🤖 RAG 기반 지능형 응답: Qdrant 벡터 DB와 온프레미스 LLM을 활용한 정확한 답변 생성
-- 📚 누적 학습 시스템: Good/Bad 피드백을 통한 지속적인 답변 품질 개선
-- 🌐 하이브리드 검색: 로컬 DB 검색 실패 시 자동으로 웹 검색으로 전환
-- 💬 대화 관리: 여러 대화 세션을 저장하고 관리
-- 📊 피드백 시스템: 사용자 피드백 기반 학습 데이터 품질 관리
-- 🎨 직관적인 UI: 다크 테마의 현대적인 채팅 인터페이스
-
-## 🏗️ 시스템 아키텍처
-
-```
-┌─────────────────┐
-│  Streamlit UI   │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐      ┌──────────────┐
-│  Query Processor│◄────►│ Learning Sys │
-└────────┬────────┘      └──────────────┘
-         │
-    ┌────┴────┐
-    ▼         ▼
-┌────────┐ ┌───────┐
-│Qdrant  │ │Web    │
-│Vector  │ │Search │
-│DB      │ │(DDG)  │
-└────────┘ └───────┘
-    │
-    ▼
-┌─────────────────┐
-│ OnPremise LLM   │
-│ (Gemma 27B)     │
-└─────────────────┘
-```
-
-## 🚀 빠른 시작
-
-### 필수 요구사항
-
-- Python 3.8 이상
-- Docker (Qdrant 실행용)
-- 최소 16GB RAM (LLM 실행 시)
-- CUDA 지원 GPU (선택사항, 성능 향상)
-
-### 설치 방법
-
-1. 저장소 클론
-```bash
-git clone https://github.com/your-username/drb-logibot-ai.git
-cd drb-logibot-ai
-```
-
-2. Python 가상환경 생성
-```bash
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-```
-
-3. 의존성 패키지 설치
-```bash
-pip install -r requirements.txt
-```
-
-4. 환경 변수 설정
-```bash
-cp .env.example .env
-# .env 파일을 편집하여 필요한 설정 입력
-```
-
-5. Qdrant 벡터 DB 실행
-```bash
-docker run -p 6333:6333 -p 6334:6334 \
-    -v $(pwd)/qdrant_storage:/qdrant/storage \
-    qdrant/qdrant
-```
-
-6. Ollama 설치 및 임베딩 모델 다운로드
-```bash
-# Ollama 설치 (https://ollama.ai/)
-ollama pull granite-embedding:278m
-```
-
-7. 애플리케이션 실행
-```bash
-streamlit run app.py
-```
-
-
-브라우저에서 `http://localhost:8501` 접속
-
-## ⚙️ 환경 설정
-
-`.env` 파일에서 다음 설정을 구성하세요:
-
-```env
-# Qdrant 설정
-QDRANT_HOST=http://localhost:6333
-QDRANT_COLLECTION=logistics_data
-LEARNING_COLLECTION=learning_history
-BAD_FEEDBACK_COLLECTION=bad_feedback_history
-
-# LLM 설정
-ONPREMISE_API_URL=http://192.168.1.120:11435/v1/chat/completions
-ONPREMISE_MODEL=ISTA-DASLab/gemma-3-27b-it-GPTQ-4b-128g
-ONPREMISE_TIMEOUT=60
-
-# Ollama 설정
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_EMBEDDING_MODEL=granite-embedding:278m
-```
-
-## 📁 프로젝트 구조
-
-```
-drb-logibot-ai/
-├── app.py                      # Streamlit 메인 애플리케이션
-├── rag_pipeline/
-│   ├── __init__.py
-│   └── query_processor.py      # RAG 로직 및 학습 시스템
-├── data/                       # 물류 문서 데이터
-├── qdrant_storage/             # Qdrant 데이터 저장소
-├── requirements.txt            # Python 의존성
-├── .env.example               # 환경 변수 템플릿
-└── README.md                  # 프로젝트 문서
-```
-
-## 💡 사용 방법
-
-### 1. 기본 질문하기
-```
-사용자: "컨베이어 벨트 유지보수 절차는?"
-봇: [구조화된 답변 + 참고 문서]
-```
-
-### 2. 피드백 제공
-- 답변이 유용한 경우: 👍 버튼 클릭
-- 답변이 부정확한 경우: 👎 버튼 클릭
-
-### 3. 대화 관리
-- 새 대화: 사이드바에서 "새 대화 시작" 클릭
-- 대화 전환: 사이드바에서 이전 대화 선택
-- 대화 삭제: 현재 대화의 🗑️ 버튼 클릭
-- 대화 이름 변경: 현재 대화의 ✏️ 버튼 클릭
-
-### 4. 대화 내보내기
-사이드바 하단의 "현재 대화 내보내기" 버튼으로 JSON 형식 저장
-
-## 🧠 학습 시스템
-
-### Good 피드백 (👍)
-- `learning_history` 컬렉션에 저장
-- 유사한 질문 발생 시 재활용
-- 재사용 횟수 추적 및 품질 점수 업데이트
-
-### Bad 피드백 (👎)
-- `bad_feedback_history` 컬렉션에 별도 저장
-- 관리자 리뷰를 위한 pending 상태 유지
-- 문제 패턴 분석을 위한 데이터 축적
-
-## 🔧 고급 설정
-
-### 커스텀 LLM 사용
-`query_processor.py`의 `OnPremiseGemmaLLM` 클래스를 수정하여 다른 LLM 통합 가능
-
-### 프롬프트 커스터마이징
-`PROMPT_TEMPLATE` 변수를 수정하여 답변 스타일 조정
-
-### 검색 파라미터 조정
-```python
-# 유사도 임계값 변경
-filtered_docs = [(doc, score) for doc, score in docs_with_scores if score >= 0.4]
-
-# 검색 결과 개수 변경
-docs_with_scores = rag_chain.vectorstore.similarity_search_with_score(query, k=5)
-```
-
-## 📊 성능 최적화
-
-### 권장 사항
-1. GPU 활용: CUDA 지원 GPU 사용 시 추론 속도 10배 향상
-2. 캐싱: 자주 묻는 질문은 Redis 캐싱 권장
-3. 배치 처리: 대량 문서 임베딩 시 배치 크기 조정
-4. 벡터 차원: 임베딩 모델에 따라 적절한 차원 선택
-
-### 성능 메트릭
-- 평균 응답 시간: ~3-5초
-- 벡터 검색 시간: ~100-200ms
-- LLM 추론 시간: ~2-4초
-
-## 🐛 문제 해결
-
-### Qdrant 연결 오류
-```bash
-# Qdrant 컨테이너 상태 확인
-docker ps | grep qdrant
-
-# 로그 확인
-docker logs <container_id>
-```
-
-### LLM API 타임아웃
-- `.env`에서 `ONPREMISE_TIMEOUT` 값 증가
-- 네트워크 연결 및 방화벽 설정 확인
-
-### 임베딩 오류
-```bash
-# Ollama 서비스 상태 확인
-ollama list
-
-# 모델 재다운로드
-ollama pull granite-embedding:278m
-```
-
-## 🤝 기여 방법
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 📝 라이선스
-
-이 프로젝트는 MIT 라이선스를 따릅니다. 자세한 내용은 [LICENSE](LICENSE) 파일을 참조하세요.
-
-## 👥 개발팀
-
-- 프로젝트 리드: [Your Name](https://github.com/your-username)
-- 이메일: your.email@example.com
-
-## 🙏 감사의 말
-
-- [Streamlit](https://streamlit.io/) - 웹 인터페이스 프레임워크
-- [Qdrant](https://qdrant.tech/) - 벡터 데이터베이스
-- [LangChain](https://langchain.com/) - LLM 오케스트레이션
-- [Ollama](https://ollama.ai/) - 로컬 LLM 실행 플랫폼
-
-## 📈 로드맵
-
-- [ ] 다국어 지원 (영어, 중국어)
-- [ ] 음성 입력/출력 기능
-- [ ] 대시보드 및 분석 기능
-- [ ] 모바일 앱 개발
-- [ ] API 엔드포인트 제공
-- [ ] 클라우드 배포 가이드
-
-## 📞 문의
+DRB 동일고무벨트 물류팀 전용 사내 RAG 기반 AI 챗봇.  
+자재 조회, 기사 납품 동선, 운영규칙 Q&A, 배차 계산을 채팅 하나로 처리합니다.
 
 ---
 
-⭐ 이 프로젝트가 도움이 되셨다면 Star를 눌러주세요!
-=======
-# 📦 DRB LOGIBOT-AI
+## 기능 개요
 
-> 물류팀을 위한 지능형 RAG 기반 AI 챗봇 시스템
-
-
-## 🌟 주요 기능
-
-- 🤖 RAG 기반 지능형 응답: Qdrant 벡터 DB와 온프레미스 LLM을 활용한 정확한 답변 생성
-- 📚 누적 학습 시스템: Good/Bad 피드백을 통한 지속적인 답변 품질 개선
-- 🌐 하이브리드 검색: 로컬 DB 검색 실패 시 자동으로 웹 검색으로 전환
-- 💬 대화 관리: 여러 대화 세션을 저장하고 관리
-- 📊 피드백 시스템: 사용자 피드백 기반 학습 데이터 품질 관리
-- 🎨 직관적인 UI: 다크 테마의 현대적인 채팅 인터페이스
-
-## 🏗️ 시스템 아키텍처
-
-```
-┌─────────────────┐
-│  Streamlit UI   │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐      ┌──────────────┐
-│  Query Processor│◄────►│ Learning Sys │
-└────────┬────────┘      └──────────────┘
-         │
-    ┌────┴────┐
-    ▼         ▼
-┌────────┐ ┌───────┐
-│Qdrant  │ │Web    │
-│Vector  │ │Search │
-│DB      │ │(DDG)  │
-└────────┘ └───────┘
-    │
-    ▼
-┌─────────────────┐
-│ OnPremise LLM   │
-│ (Gemma 27B)     │
-└─────────────────┘
-```
-
-## 🚀 빠른 시작
-
-### 필수 요구사항
-
-- Python 3.8 이상
-- Docker (Qdrant 실행용)
-- 최소 16GB RAM (LLM 실행 시)
-- CUDA 지원 GPU (선택사항, 성능 향상)
-
-### 설치 방법
-
-1. 저장소 클론
-```bash
-git clone https://github.com/your-username/drb-logibot-ai.git
-cd drb-logibot-ai
-```
-
-2. Python 가상환경 생성
-```bash
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-```
-
-3. 의존성 패키지 설치
-```bash
-pip install -r requirements.txt
-```
-
-4. 환경 변수 설정
-```bash
-cp .env.example .env
-# .env 파일을 편집하여 필요한 설정 입력
-```
-
-5. Qdrant 벡터 DB 실행
-```bash
-docker run -p 6333:6333 -p 6334:6334 \
-    -v $(pwd)/qdrant_storage:/qdrant/storage \
-    qdrant/qdrant
-```
-
-6. Ollama 설치 및 임베딩 모델 다운로드
-```bash
-# Ollama 설치 (https://ollama.ai/)
-ollama pull granite-embedding:278m
-```
-
-7. 애플리케이션 실행
-```bash
-streamlit run app.py
-```
-
-
-브라우저에서 `http://localhost:8501` 접속
-
-## ⚙️ 환경 설정
-
-`.env` 파일에서 다음 설정을 구성하세요:
-
-```env
-# Qdrant 설정
-QDRANT_HOST=http://localhost:6333
-QDRANT_COLLECTION=logistics_data
-LEARNING_COLLECTION=learning_history
-BAD_FEEDBACK_COLLECTION=bad_feedback_history
-
-# LLM 설정
-ONPREMISE_API_URL=http://192.168.1.120:11435/v1/chat/completions
-ONPREMISE_MODEL=ISTA-DASLab/gemma-3-27b-it-GPTQ-4b-128g
-ONPREMISE_TIMEOUT=60
-
-# Ollama 설정
-OLLAMA_HOST=http://localhost:11434
-OLLAMA_EMBEDDING_MODEL=granite-embedding:278m
-```
-
-## 📁 프로젝트 구조
-
-```
-drb-logibot-ai/
-├── app.py                      # Streamlit 메인 애플리케이션
-├── rag_pipeline/
-│   ├── __init__.py
-│   └── query_processor.py      # RAG 로직 및 학습 시스템
-├── data/                       # 물류 문서 데이터
-├── qdrant_storage/             # Qdrant 데이터 저장소
-├── requirements.txt            # Python 의존성
-├── .env.example               # 환경 변수 템플릿
-└── README.md                  # 프로젝트 문서
-```
-
-## 💡 사용 방법
-
-### 1. 기본 질문하기
-```
-사용자: "컨베이어 벨트 유지보수 절차는?"
-봇: [구조화된 답변 + 참고 문서]
-```
-
-### 2. 피드백 제공
-- 답변이 유용한 경우: 👍 버튼 클릭
-- 답변이 부정확한 경우: 👎 버튼 클릭
-
-### 3. 대화 관리
-- 새 대화: 사이드바에서 "새 대화 시작" 클릭
-- 대화 전환: 사이드바에서 이전 대화 선택
-- 대화 삭제: 현재 대화의 🗑️ 버튼 클릭
-- 대화 이름 변경: 현재 대화의 ✏️ 버튼 클릭
-
-### 4. 대화 내보내기
-사이드바 하단의 "현재 대화 내보내기" 버튼으로 JSON 형식 저장
-
-## 🧠 학습 시스템
-
-### Good 피드백 (👍)
-- `learning_history` 컬렉션에 저장
-- 유사한 질문 발생 시 재활용
-- 재사용 횟수 추적 및 품질 점수 업데이트
-
-### Bad 피드백 (👎)
-- `bad_feedback_history` 컬렉션에 별도 저장
-- 관리자 리뷰를 위한 pending 상태 유지
-- 문제 패턴 분석을 위한 데이터 축적
-
-## 🔧 고급 설정
-
-### 커스텀 LLM 사용
-`query_processor.py`의 `OnPremiseGemmaLLM` 클래스를 수정하여 다른 LLM 통합 가능
-
-### 프롬프트 커스터마이징
-`PROMPT_TEMPLATE` 변수를 수정하여 답변 스타일 조정
-
-### 검색 파라미터 조정
-```python
-# 유사도 임계값 변경
-filtered_docs = [(doc, score) for doc, score in docs_with_scores if score >= 0.4]
-
-# 검색 결과 개수 변경
-docs_with_scores = rag_chain.vectorstore.similarity_search_with_score(query, k=5)
-```
-
-## 📊 성능 최적화
-
-### 권장 사항
-1. GPU 활용: CUDA 지원 GPU 사용 시 추론 속도 10배 향상
-2. 캐싱: 자주 묻는 질문은 Redis 캐싱 권장
-3. 배치 처리: 대량 문서 임베딩 시 배치 크기 조정
-4. 벡터 차원: 임베딩 모델에 따라 적절한 차원 선택
-
-### 성능 메트릭
-- 평균 응답 시간: ~3-5초
-- 벡터 검색 시간: ~100-200ms
-- LLM 추론 시간: ~2-4초
-
-## 🐛 문제 해결
-
-### Qdrant 연결 오류
-```bash
-# Qdrant 컨테이너 상태 확인
-docker ps | grep qdrant
-
-# 로그 확인
-docker logs <container_id>
-```
-
-### LLM API 타임아웃
-- `.env`에서 `ONPREMISE_TIMEOUT` 값 증가
-- 네트워크 연결 및 방화벽 설정 확인
-
-### 임베딩 오류
-```bash
-# Ollama 서비스 상태 확인
-ollama list
-
-# 모델 재다운로드
-ollama pull granite-embedding:278m
-```
-
-## 🤝 기여 방법
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 📝 라이선스
-
-이 프로젝트는 MIT 라이선스를 따릅니다. 자세한 내용은 [LICENSE](LICENSE) 파일을 참조하세요.
-
-## 👥 개발팀
-
-- 프로젝트 리드: [Your Name](https://github.com/your-username)
-- 이메일: your.email@example.com
-
-## 🙏 감사의 말
-
-- [Streamlit](https://streamlit.io/) - 웹 인터페이스 프레임워크
-- [Qdrant](https://qdrant.tech/) - 벡터 데이터베이스
-- [LangChain](https://langchain.com/) - LLM 오케스트레이션
-- [Ollama](https://ollama.ai/) - 로컬 LLM 실행 플랫폼
-
-## 📈 로드맵
-
-- [ ] 다국어 지원 (영어, 중국어)
-- [ ] 음성 입력/출력 기능
-- [ ] 대시보드 및 분석 기능
-- [ ] 모바일 앱 개발
-- [ ] API 엔드포인트 제공
-- [ ] 클라우드 배포 가이드
-
-## 📞 문의
+| 기능 | 설명 |
+|---|---|
+| 자재 조회 | 자재코드 7자리 입력 시 규격·중량·배차 정보 즉시 반환 |
+| 기사 납품 동선 | 지입기사별 요일별 납품 동선, 격주 교대 자동 판별 |
+| 운영규칙 Q&A | 물류팀 운영규칙 51개 항목 자연어 질의응답 |
+| 담당자 조회 | 공정별 담당자·내선번호·클레임 문의처 |
+| 컨베어벨트 직경 계산 | PLY·고무두께 기반 롤 직경 자동 계산 |
+| 배차 시뮬레이터 | 국내운임비교 / 수출포장량 / 컨베어벨트배차 / 국내최적배차 |
+| 국내 운송방식 | 총중량·도착지 기준 직송·화물·택배 자동 추천 |
+| 수출 포장량 | 자재그룹(B01/B02/N18/N19)별 박스 수량 자동 계산 |
 
 ---
 
-⭐ 이 프로젝트가 도움이 되셨다면 Star를 눌러주세요!
->>>>>>> 4d38cb8954522ef373f495f048d7d2eb518430ed
+## 기술 스택
+
+```
+Frontend     Streamlit
+RAG          LangChain
+LLM          gpt-oss-120b (On-Premise :9800)
+Embedding    granite-embedding:278m (Ollama :11434)
+Vector DB    Qdrant (On-Premise :6333)
+Data         Excel V5 (.xlsx) — 12개 시트
+Language     Python 3.12
+```
+
+---
+
+## 프로젝트 구조
+
+```
+Logibot-DRB/
+├── app.py                          # Streamlit 메인 앱 (UI + 시뮬레이터)
+├── .env                            # 환경변수 (Git 제외)
+├── requirements.txt
+└── rag_pipeline/
+    ├── query_processor.py          # RAG 쿼리 처리 (도메인 분류·검색·LLM 생성)
+    ├── data_loader.py              # Excel → Qdrant 적재 파이프라인
+    ├── 3D.py                       # 3D 적재 시뮬레이터 (Plotly)
+    └── data/
+        └── source_docs/
+            ├── Logibot-Data(기본)_V5.xlsx   # 메인 데이터 (Git 제외)
+            └── 운임_테이블.xlsx              # 운임 데이터 (Git 제외)
+```
+
+---
+
+## 설치 및 실행
+
+### 1. 패키지 설치
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+pip install -r requirements.txt
+```
+
+### 2. 환경변수 설정
+
+`.env` 파일을 프로젝트 루트에 생성합니다.
+
+```env
+# LLM 서버
+LLM_BASE_URL=http://localhost:9800
+LLM_MODEL=gpt-oss-120b
+
+# Qdrant
+QDRANT_HOST=localhost
+QDRANT_PORT=6333
+QDRANT_COLLECTION=logistics_data
+
+# Ollama 임베딩
+OLLAMA_HOST=http://localhost:11434
+OLLAMA_EMBEDDING_MODEL=granite-embedding:278m
+
+# 데이터 파일 경로
+LOGIBOT_EXCEL_PATH=rag_pipeline/data/source_docs/Logibot-Data(기본)_V5.xlsx
+LOGIBOT_FARE_PATH=rag_pipeline/data/source_docs/운임_테이블.xlsx
+```
+
+### 3. Qdrant 데이터 적재
+
+처음 실행하거나 Excel 데이터가 변경된 경우 실행합니다.
+
+```bash
+cd rag_pipeline
+python data_loader.py --reset
+```
+
+적재 완료 후 로그 확인:
+```
+INFO - 차량 후보 10개 (Qdrant 파싱)        ← 차량 데이터 정상
+INFO - 운임 테이블: N건 적재 완료           ← 운임 데이터 정상
+```
+
+### 4. 앱 실행
+
+```bash
+# 프로젝트 루트에서 실행
+streamlit run app.py
+```
+
+---
+
+## 데이터 구조 (Excel V5 — 12개 시트)
+
+| 시트명 | 도메인 | 설명 |
+|---|---|---|
+| 물류팀 운영 규칙 | operation_rule | Q&A 51개 항목 |
+| 지입 차량(기사) 노선 데이터 | driver_route | 기사별 요일별 납품 동선, A/B/공통 그룹 |
+| 물류팀 현황 데이터 | personnel | 팀원 28명 직책·담당공정·내선번호 |
+| 차량 데이터 | vehicle | 차량 10종 최대중량·적재함 스펙 |
+| 컨베어벨트 규격 데이터 | conveyor | 자재코드별 PLY·고무두께·포규격 |
+| 크롤러 러버트랙 규격 데이터 | crawler | 자재코드별 1PC중량·PLT적재수 |
+| 용차 차량 노선 데이터 | domestic | 권역별 거리기준·소요시간 |
+| 포장량 산출 데이터 | export | B01/B02/N18/N19 박스당 중량 |
+| 수출 포장량 산출 수식 | export | 포장량 계산 공식 |
+| 주름혹벨트 우든박스 사이즈 데이터 | sidewall | 자재코드별 우든박스 규격 |
+| 파렛트, 박스 데이터 | pallet_box | 공정별 PLT·BOX 포장재 규격 |
+| 컨베어벨트 직경 산출 수식 | conveyor | 롤 직경 계산 공식 |
+
+---
+
+## 검색 구조 (3단 레이어)
+
+```
+질문 입력
+  │
+  ├─ 시뮬레이터 키워드 매칭 → 해당 시 즉시 유도 메시지 반환 (LLM 미호출)
+  │
+  └─ Layer 1: 도메인 분류 (_detect_domain)
+       8개 도메인 키워드 우선순위 판별 + 자재코드 7자리 감지
+       │
+       └─ Layer 2: 하이브리드 검색 (hybrid_search)
+            코드 검색(Qdrant filter) → 벡터 검색(k=50, 임계값 0.15~0.20)
+            → 도메인 강제 보완(fetch_whole_docs) → Fallback(임계값 0.10)
+            │
+            └─ Layer 3: 컨텍스트 조립 + LLM 생성
+                 도메인별 context limit (4,000 / 6,000 / 8,000자)
+                 → get_domain_prompt → gpt-oss-120b → 답변 반환
+
+특수 처리:
+  - 기사 노선: LLM 미사용, Python 직접 포맷팅
+  - 운임 계산: calculate_fare_comparison() 직접 계산
+  - Excel Fallback: Qdrant 문서 18개 미만 시 직접 조회
+```
+
+---
+
+## 격주 기사 교대 기준
+
+중부물류센터 지입기사(이용구/심효섭)는 격주로 노선이 교대됩니다.
+
+```python
+BIWEEKLY_ANCHOR = date(2026, 5, 25)  # B주 기준 (이용구 운행)
+# weeks_elapsed % 2 == 0 → B주(이용구) / 홀수 → A주(심효섭)
+```
+
+---
+
+## 주요 변경 이력
+
+| 버전 | 내용 |
+|---|---|
+| V5 | 격주 로직 버그 수정, 운영규칙 summary 청크 추가, 도메인 분류 개선(operation_rule / vehicle / pallet_box / sidewall), 시뮬레이터 유도 컨베어벨트배차 추가, context limit 도메인별 차등, 차량 파싱 skip 버그 수정, 운임 테이블 .env 지원 |
+| V4 | 초기 RAG 구조, 7개 도메인, 17개 단일 프롬프트 |
+
+---
+
+## 참고
+
+- 임베딩 모델: [granite-embedding](https://ollama.com/library/granite-embedding) (768차원)
+- 벡터 DB: [Qdrant](https://qdrant.tech/)
+---
