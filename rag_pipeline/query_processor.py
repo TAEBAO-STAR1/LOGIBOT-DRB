@@ -306,10 +306,15 @@ _DOMAIN_RULES = {
    → 세부 구성도 요청 시: "사무직 ○명, 현장직 ○명, 지입기사 ○명"
 2. 전체 현황 요청("현황", "명단", "알려줘"): 표 형식 | 성명 | 직책 | 담당공정 | 내선 |
    전화번호 0이면 "직통번호 없음 (내선 문의)"
-3. 직책자 질문: 팀장·주임·기정만 출력 (사원·팀원·기사 제외)
+3. 직책자 질문: 팀장·주임·기정만 출력 (사원·팀원·지입기사 제외)
+   ※ 단, 지게차/외주 기사 현황 질문은 예외 → 아래 규칙6 적용
 4. 클레임/문의처: 해당 공정 주임 1명 + 팀원 1명만, 그 외 절대 포함 금지
    형식: "○○ 관련 문의는 아래 담당자에게 연락해 주세요.\n- 홍길동 주임 (내선: 1234)"
-5. 지입기사 질문: 이름·연락처·차량 종류 제시""",
+5. 지입기사 질문: 이름·연락처·차량 종류 제시
+6. 지게차·외주 기사 현황 질문("지게차 기사", "지게차 기사님", "외주 기사"):
+   → [참고 데이터]의 운영규칙에서 지게차 관련 Q&A를 찾아 그대로 답변
+   → "지게차 기사님 총 3명 (4.5톤 3대, 10톤 1대)" 형식으로 제시
+   → 데이터에 이름/연락처가 없으면 "담당자(신태환 팀원, 내선 9067)에게 문의" 안내""",
 
     "vehicle": """
 [차량 제원 전용 규칙]
@@ -864,6 +869,8 @@ class RAGChainWrapper:
             "누구야", "누구예요", "누구죠", "누구인가요", "누구에게",
             "누구한테", "연락처", "전화번호", "내선번호",
             "직책자", "책임자", "관리자", "몇 명이야", "몇 명인가요",
+            "기사님 현황", "기사님들 현황", "기사 현황", "기사들 현황",
+            "지게차 기사", "지게차 기사님", "지게차 기사들",
             "팀원이", "팀장이", "현황이", "인원이",
             "담당이라는게", "담당이란게", "담당 맞나요", "담당인가요",
         ]
@@ -891,17 +898,25 @@ class RAGChainWrapper:
             # 사고/문의 처리
             "훼손", "미도착", "오배송", "반품", "검토 요청", "아웃바운드",
             "불량 발생", "오(미)배송",
-            # 지게차
+            # 지게차 (요청 방법 / 사용 가능 톤수 / 업무 절차)
             "지게차 요청", "지게차 작업", "지게차 톤",
             "지게차를 요청", "지게차 이용", "지게차 사용", "지게차 신청", "지게차가", "지게차는",
+            "지게차 지원", "지게차 필요", "지게차 부탁", "지게차 써야", "지게차 어떻게",
+            "지게차 좀", "지게차 있어", "지게차 되나", "지게차 가능", "지게차 불러",
+            "지게차 연락", "지게차 보내", "지게차 써도", "지게차 빌려",
+            "짐 옮겨", "짐을 옮겨", "짐 이동", "짐을 이동", "물건 옮겨", "물건을 옮겨",
+            "무거운 짐", "무거운 물건", "중량물 이동", "중량물 옮",
             # 수출
             "선적 서류", "수출 컨테이너", "위험물", "항공편",
             # 기타 운영
             "운영 규칙", "운영규칙", "원자재 창고", "보관 온도",
             "도로 교통법", "운송 제한", "DCM", "그룹웨어",
         ]
-        # 컨베어/컨베이어/롤 맥락이 있으면 operation_rule로 빠지지 않도록 예외처리
-        _is_conveyor_ctx = any(k in query for k in ["컨베어", "컨베이어", "ROLL", "roll", "롤"])
+        # 컨베어/컨베이어/롤 맥락이 있더라도 운영규칙 전용 키워드(철복스, 분단 등)가
+        # 명시적으로 있으면 operation_rule로 허용 → 컨베어 배차 질문만 차단
+        _conveyor_dispatch_kw = ["배차", "몇 대", "몇대", "차량 몇", "ROLL", "roll"]
+        _is_conveyor_dispatch = any(k in query for k in _conveyor_dispatch_kw)
+        _is_conveyor_ctx = any(k in query for k in ["컨베어", "컨베이어", "롤"]) and _is_conveyor_dispatch
         if any(k in query for k in operation_rule_kw) and not _is_conveyor_ctx:
             logger.info(f"운영규칙 키워드 감지 → 도메인: operation_rule")
             return "operation_rule"
@@ -1180,7 +1195,7 @@ class RAGChainWrapper:
         "export"        : ["수출 포장량 산출 수식", "포장량 산출 데이터", "물류팀 운영 규칙"],
         "driver_route"  : ["지입 차량(기사) 노선 데이터"],
         "personnel"     : ["물류팀 현황 데이터"],
-        "operation_rule": ["물류팀 운영 규칙"],
+        "operation_rule": ["물류팀 운영 규칙", "물류팀 현황 데이터"],
         # Fix: vehicle 도메인 신규 추가 → 차량 제원 질문 전용
         "vehicle"       : ["차량 데이터"],
         "pallet_box"    : ["파렛트, 박스 데이터"],  # Fix: PLT/박스 도메인 추가
@@ -1317,7 +1332,7 @@ class RAGChainWrapper:
 
             # general 도메인 → 운영 규칙 강제 보완 (샘플/주문/배송 등 일반 업무 질문)
             if domain in ("general", "operation_rule"):
-                op_docs = self.fetch_whole_docs(["물류팀 운영 규칙"], limit=60)  # summary 1개 + Q&A 51개
+                op_docs = self.fetch_whole_docs(["물류팀 운영 규칙"], limit=100)  # summary 1개 + Q&A 전체 (51개 이상 대비)
                 if op_docs:
                     # summary 청크를 맨 앞으로 정렬 → context 앞부분에 전체 Q&A 요약 배치
                     summary_first = sorted(op_docs, key=lambda x: 0 if x[0].metadata.get("type") == "summary" else 1)
@@ -1375,10 +1390,13 @@ class RAGChainWrapper:
                             existing.add(doc.page_content[:50])
                             added += 1
                     # 벡터 결과에서 personnel 이외 도메인 문서 제거 → 데이터 혼입 방지
+                    # ★ 운영규칙도 허용: 지게차 기사 현황 등이 운영규칙 시트에 존재
                     filtered_results = [
                         (doc, score) for doc, score in filtered_results
                         if doc.metadata.get("domain") == "personnel"
                         or doc.metadata.get("source") == "물류팀 현황 데이터"
+                        or doc.metadata.get("source") == "물류팀 운영 규칙"
+                        or doc.metadata.get("domain") == "operation_rule"
                     ]
                     logger.info(f"personnel 강제 보완: +{added}개, 타도메인 문서 제거 후 {len(filtered_results)}개")
 
@@ -2694,7 +2712,7 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
             if _domain_for_limit in ("driver_route", "operation_rule"):
                 _ctx_limit = 8000  # 운영규칙 summary(~5500자) + 개별 청크 여유분
             elif _domain_for_limit in ("general", "personnel"):
-                _ctx_limit = 6000
+                _ctx_limit = 8000  # Fix: 지게차 기사 등 운영규칙+현황 동시 참조 필요
             else:
                 _ctx_limit = 4000
             if len(context_text) > _ctx_limit:

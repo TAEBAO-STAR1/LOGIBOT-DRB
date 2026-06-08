@@ -2125,7 +2125,7 @@ with st.sidebar:
 
         # ── 국내 최적 배차 시뮬레이터 (국내영업팀 전용) ─────────────────────
         st.markdown(
-            '<div style="font-size:17px;font-weight:700;color:var(--text-color);margin:4px 0 2px 0;line-height:1.4;">🚛 최적 배차 시뮬레이터</div>'
+            '<div style="font-size:17px;font-weight:700;color:var(--text-color);margin:4px 0 2px 0;line-height:1.4;">🚛 크롤러 배차 시뮬레이터</div>'
             '<hr style="height:3px;border:none;border-radius:2px;background:linear-gradient(90deg,#ff6b6b,#ffa500,#ffd700,#7ed957,#4fc3f7,#7c4dff);margin:3px 0 12px 0;">',
             unsafe_allow_html=True
         )

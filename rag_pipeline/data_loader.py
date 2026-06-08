@@ -39,9 +39,9 @@ QDRANT_COLLECTION      = os.getenv("QDRANT_COLLECTION",      "logistics_data")
 QDRANT_HOST            = os.getenv("QDRANT_HOST",            "localhost")
 QDRANT_PORT            = int(os.getenv("QDRANT_PORT",        "6333"))
 QDRANT_API_KEY         = os.getenv("QDRANT_API_KEY",         None)
-OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "granite-embedding:278m")
+OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")
 OLLAMA_HOST            = os.getenv("OLLAMA_HOST",            "http://localhost:11434")
-VECTOR_DIM             = 768
+VECTOR_DIM             = 1024
 BATCH_SIZE             = 64
 
 # ── 격주 기준 앵커 (5/28이 속한 주 월요일) ──────────────────────
