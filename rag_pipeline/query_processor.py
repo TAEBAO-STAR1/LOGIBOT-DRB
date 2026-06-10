@@ -119,6 +119,7 @@ SIMULATOR_GUIDE = {
             "최적의 배차", "최적 배차", "배차를 알려", "배차 알려줘",
             "운송 방법", "운반 방법", "어떻게 보내", "어떤 차량으로",
             "직송이야", "화물이야", "택배야", "화물로 보내", "직송으로",
+
         ],
         "msg": (
             "💡 **국내 운임 비교는 시뮬레이터를 이용해주세요!**\n\n"
@@ -143,6 +144,11 @@ SIMULATOR_GUIDE = {
             "크롤러 배차", "러버트랙 배차", "RT 배차",
             "크롤러 몇 대", "크롤러 차량 몇", "배차 계산",
             "차량 몇 대 필요", "크롤러 몇 톤", "러버트랙 몇 대",
+            # 자재코드 + 수량 + 배차 조합 질문
+            "중량과 포장단위", "포장단위", "출고를 위한 배차", "출고 배차",
+            "개의 중량", "개 배차", "개 차량", "수량 배차",
+            "수량과 배차", "수량 차량", "몇개 배차", "몇 개 배차",
+            "포장단위 배차", "중량 배차 차량", "출고 차량",
         ],
         "msg": (
             "💡 **크롤러 배차 계산은 시뮬레이터를 이용해주세요!**\n\n"
@@ -154,10 +160,51 @@ SIMULATOR_GUIDE = {
 
 def check_simulator_intent(query: str) -> str | None:
     """시뮬레이터 처리 가능 질문이면 유도 메시지 반환, 아니면 None"""
+    import re as _re
     q = query.strip()
+
+    # ── 1) 키워드 기반 시뮬레이터 유도 (기존 방식) ───────────────────
     for sim_name, info in SIMULATOR_GUIDE.items():
         if any(kw in q for kw in info["keywords"]):
             return info["msg"]
+
+    # ── 2) 자재코드 + 배차/차량 맥락 → 시뮬레이터 자동 유도 ──────────
+    # 자재코드 패턴: 7자리 숫자
+    _code_pat = _re.search(r"\b(\d{7})\b", q)
+    if _code_pat:
+        _code = int(_code_pat.group(1))
+        # 배차/차량 맥락 키워드
+        _dispatch_kw = [
+            "배차", "차량", "몇 톤", "몇톤", "출고", "운송",
+            "적재", "싣", "몇 대", "배달", "보내",
+        ]
+        _is_dispatch = any(k in q for k in _dispatch_kw)
+
+        if _is_dispatch:
+            # 자재코드 범위로 시뮬레이터 결정
+            # 컨베어벨트 코드: B0x로 시작하는 7자리 (예: 1093605, 9000xxx)
+            # 크롤러 코드: 6xxxxxxx (예: 6004216, 6005489)
+            # 수출 코드: B01/B02/N18/N19 시작
+            if 6000000 <= _code <= 6999999:
+                return (
+                    "💡 **크롤러 러버트랙 배차 계산은 시뮬레이터를 이용해주세요!**\n\n"
+                    "자재코드·수량을 입력하면 중량·PLT 수·적정 차량을 자동 계산합니다.\n"
+                    "좌측 메뉴 → **[국내최적배차 시뮬레이터]** 를 클릭해보세요."
+                )
+            elif 1000000 <= _code <= 1999999 or 9000000 <= _code <= 9099999:
+                return (
+                    "💡 **컨베어벨트 배차 계산은 시뮬레이터를 이용해주세요!**\n\n"
+                    "자재코드·길이(m)·롤 수를 입력하면 롤 직경과 적합 차량을 자동 계산합니다.\n"
+                    "좌측 메뉴 → **[컨베어벨트배차 시뮬레이터]** 를 클릭해보세요."
+                )
+            else:
+                # 코드 범위 불명확 → 일반 배차 시뮬레이터 유도
+                return (
+                    "💡 **배차 차량 계산은 시뮬레이터를 이용해주세요!**\n\n"
+                    "자재코드·수량을 입력하면 적정 차량을 자동 추천합니다.\n"
+                    "좌측 메뉴 → **[국내최적배차 시뮬레이터]** 를 클릭해보세요."
+                )
+
     return None
 
 # ══════════════════════════════════════════════════════════════
@@ -854,196 +901,118 @@ class RAGChainWrapper:
         
     def _detect_domain(self, query: str, keyword_doc_content: str = "") -> str:
         """
-        질문 + 검색된 문서 내용을 기반으로 도메인 판별.
-        자재코드가 있으면 코드-시트 매핑으로 우선 판별 (가장 정확).
-        단, 운송방식 키워드가 함께 있으면 domestic 우선 적용.
-        반환값: 'conveyor' | 'sidewall' | 'crawler' | 'export' | 'domestic' | 'driver_route' | 'personnel' | 'operation_rule' | 'vehicle' | 'general'
+        도메인 판별 — 3단계 전략:
+          1단계) 확정적 코드 판별 (자재코드 매핑 / 제품명 / 기사 이름)
+          2단계) 구조적 컨텍스트 판별 (업무 맥락이 명확한 키워드만 최소한으로 유지)
+          3단계) LLM 경량 분류 (1~2단계에서 판별 못한 애매한 케이스)
         """
         combined = query + " " + keyword_doc_content
 
-        # ── 0순위: 담당자/인원 조회 — 자재 키워드와 혼재해도 personnel 우선 ──
-        # "컨베어,크로라 담당이 누구야" 같은 질문을 conveyor로 잘못 분류 방지
-        # "담당", "담당자", "누구" 등 + 인물/조직 관련 키워드가 핵심
-        personnel_strong_kw = [
-            "담당자", "담당이", "담당은", "담당 이", "누가 담당",
-            "누구야", "누구예요", "누구죠", "누구인가요", "누구에게",
-            "누구한테", "연락처", "전화번호", "내선번호",
-            "직책자", "책임자", "관리자", "몇 명이야", "몇 명인가요",
-            "기사님 현황", "기사님들 현황", "기사 현황", "기사들 현황",
-            "지게차 기사", "지게차 기사님", "지게차 기사들",
-            "팀원이", "팀장이", "현황이", "인원이",
-            "담당이라는게", "담당이란게", "담당 맞나요", "담당인가요",
-        ]
-        if any(k in query for k in personnel_strong_kw):
-            logger.info(f"담당자 강한 키워드 감지 → 도메인: personnel")
-            return "personnel"
+        # ══════════════════════════════════════════
+        # 1단계: 확정적 코드 판별 (LLM 불필요, 100% 정확)
+        # ══════════════════════════════════════════
 
-        # ── 0.5순위: 운영규칙 전용 키워드 (domestic보다 먼저 체크) ──────
-        # '출고','화물','택배' 등이 포함된 운영규칙 질문이 domestic으로
-        # 잘못 분류되는 것을 방지
-        operation_rule_kw = [
-            # 주문/마감
-            "주문 마감", "마감 시간", "마감시간", "당일 출고", "당일출고",
-            "출고 변경", "출고 취소", "주말 출고", "선입선출",
-            # 운송/배차 규칙
-            "운송 현황", "운송현황", "도착시간 확인", "추가 운임", "추가운임",
-            "배차 단가", "배차단가", "배차 신청", "배차신청", "배차 방법",
-            "지입기사", "추가 운행", "추가운행", "허용 중량", "과적",
-            "제주도", "긴급 발주", "긴급발주", "운임 기준", "운임기준",
-            # 샘플/수령/포장
-            "수령 가능", "샘플 수령", "샘플은 어떻게", "샘플 받", "벨트 샘플",
-            "바코드 기입", "QR 기입", "박스 외면", "박스 규격",
-            "포장 분단", "분단 가능", "철복스",
-            "분단이 가능", "분단 되나", "분단해줘", "지금 분단", "벨트 분단", "분단할 수",
-            # 사고/문의 처리
-            "훼손", "미도착", "오배송", "반품", "검토 요청", "아웃바운드",
-            "불량 발생", "오(미)배송",
-            # 지게차 (요청 방법 / 사용 가능 톤수 / 업무 절차)
-            "지게차 요청", "지게차 작업", "지게차 톤",
-            "지게차를 요청", "지게차 이용", "지게차 사용", "지게차 신청", "지게차가", "지게차는",
-            "지게차 지원", "지게차 필요", "지게차 부탁", "지게차 써야", "지게차 어떻게",
-            "지게차 좀", "지게차 있어", "지게차 되나", "지게차 가능", "지게차 불러",
-            "지게차 연락", "지게차 보내", "지게차 써도", "지게차 빌려",
-            "짐 옮겨", "짐을 옮겨", "짐 이동", "짐을 이동", "물건 옮겨", "물건을 옮겨",
-            "무거운 짐", "무거운 물건", "중량물 이동", "중량물 옮",
-            # 수출
-            "선적 서류", "수출 컨테이너", "위험물", "항공편",
-            # 기타 운영
-            "운영 규칙", "운영규칙", "원자재 창고", "보관 온도",
-            "도로 교통법", "운송 제한", "DCM", "그룹웨어",
-        ]
-        # 컨베어/컨베이어/롤 맥락이 있더라도 운영규칙 전용 키워드(철복스, 분단 등)가
-        # 명시적으로 있으면 operation_rule로 허용 → 컨베어 배차 질문만 차단
-        _conveyor_dispatch_kw = ["배차", "몇 대", "몇대", "차량 몇", "ROLL", "roll"]
-        _is_conveyor_dispatch = any(k in query for k in _conveyor_dispatch_kw)
-        _is_conveyor_ctx = any(k in query for k in ["컨베어", "컨베이어", "롤"]) and _is_conveyor_dispatch
-        if any(k in query for k in operation_rule_kw) and not _is_conveyor_ctx:
-            logger.info(f"운영규칙 키워드 감지 → 도메인: operation_rule")
-            return "operation_rule"
+        # 1-1. 기사 이름 직접 매칭 → driver_route (이름은 오해 여지 없음)
+        DRIVER_NAMES = ["김병일", "김영철", "이용구", "심효섭"]
+        if any(n in query for n in DRIVER_NAMES):
+            return "driver_route"
 
-        # ── 0.5순위: 파렛트·박스 포장재 키워드 ──────────────────────────
-        pallet_kw = [
-            "파렛트", "PLT", "plt", "팔레트", "pallet",
-            "포장재 규격", "포장재 리스트", "포장재 종류",
-            "내수용 PLT", "수출용 PLT", "내수 PLT", "수출 PLT",
-            "박스 규격", "박스 리스트", "BOX 규격",
-            "PE포", "받침목",
-        ]
-        if any(k in query for k in pallet_kw):
-            logger.info(f"파렛트/박스 키워드 감지 → 도메인: pallet_box")
-            return "pallet_box"
-
-        # ── 0.6순위: 주름혹벨트(사이드월) 우든박스 키워드 ───────────────
-        sidewall_kw = [
-            "주름혹벨트", "사이드월", "sidewall", "우든박스", "우든 박스",
-            "포장박스사이즈", "박스사이즈", "박스 사이즈", "포장 박스",
-            "주문길이", "주문 길이", "박스규격", "박스 규격",
-        ]
-        if any(k in query for k in sidewall_kw):
-            logger.info(f"주름혹벨트 키워드 감지 → 도메인: sidewall")
+        # 1-2. 제품 고유명 → 기술 도메인 (오분류 시 계산 오답 위험)
+        if any(k in combined for k in ["컨베어벨트", "컨베이어벨트", "컨베이어 벨트"]):
+            # 담당자 질문 제외
+            if not any(k in combined for k in ["담당", "누구", "연락", "직책"]):
+                return "conveyor"
+        if any(k in combined for k in ["러버트랙", "Rubber Track", "rubber track"]):
+            if not any(k in combined for k in ["담당", "누구", "연락", "직책"]):
+                return "crawler"
+        if any(k in combined for k in ["주름혹벨트", "주름혹 벨트"]):
             return "sidewall"
 
-        # ── 0.7순위: 차량 제원 전용 키워드 ────────────────────────────
-        vehicle_kw = [
-            "차량 제원", "차량제원", "적재함 크기", "적재함 길이", "적재함 폭",
-            "차량 종류", "차량종류", "톤수별 차량", "차량 규격", "차량규격",
-            "몇 톤 차량", "차량 몇 톤", "차량 정보", "차량 스펙",
-        ]
-        if any(k in query for k in vehicle_kw):
-            logger.info(f"차량 제원 키워드 감지 → 도메인: vehicle")
-            return "vehicle"
-
-        # ── 1순위: 국내 운송방식 키워드 ─────────────────────────────────
-        domestic_kw = [
-            "운송방식", "국내 출고", "운송 방식", "어떤 운송",
-            "운반 방법", "배송 방법", "배송방법", "운반방법",
-            # 중량+운송/배차 조합 (지역명 불필요)
-            "kg 운송", "ton 운송", "톤 운송", "kg 배차", "ton 배차",
-            "최적의 배차", "최적 배차", "배차를 알려", "배차 알려줘",
-            "어떻게 보내", "어떤 차량으로", "직송이야", "화물이야", "택배야",
-        ]
-        if any(k in query for k in domestic_kw) and not _is_conveyor_ctx:
-            logger.info(f"운송방식 키워드 감지 → 도메인: domestic")
-            return "domestic"
-
-        # ── 2순위: 코드-시트 매핑으로 정확한 판별 ──────────────────────
+        # 1-3. 자재코드 매핑 (가장 정확한 판별)
         code = self.extract_material_code(query)
         if code:
             domain_from_code = self._domain_from_code(code)
             if domain_from_code:
-                logger.info(f"코드 {code} → 도메인: {domain_from_code} (매핑 캐시)")
+                logger.info(f"코드 {code} → 도메인: {domain_from_code}")
                 return domain_from_code
-
-        # ── 3순위: 키워드 기반 판별 ──────────────────────────────────────
-
-        # [문제1 수정] 자재코드가 있는데 도메인 캐시 미스인 경우
-        # "1093605 자재 포장 합한 총 중량" → 자재코드 있음 → sidewall 로 가야 함
-        # 코드 캐시 미스 시 키워드로 보조 판별
-        if code:
-            sidewall_code_kw = ["포장", "총 중량", "총중량", "우든", "박스 무게", "전체 중량"]
-            if any(k in query for k in sidewall_code_kw):
+            # 코드 있는데 캐시 미스 → 키워드 보조
+            if any(k in query for k in ["포장", "총 중량", "우든", "박스 무게"]):
                 return "sidewall"
 
-        # 지입기사 납품 동선 도메인
-        # [문제3 수정] 특정 기사 이름이 있으면 driver_route, 이름 없이 "기사" 단독은 personnel
-        cost_kw = ["단가", "비용", "차이", "가격", "운임", "요금", "금액"]
-        driver_kw = [
-            "지입기사", "납품 동선", "동선", "기사 노선", "납품 노선", "배달 경로",
-            "김병일", "김영철", "이용구", "심효섭",
-            "부산기사", "중부기사", "서울기사",
-            "지입 기사", "납품경로", "납품코스", "노선 알려",
-        ]
-        if any(k in combined for k in driver_kw) and not any(k in combined for k in cost_kw):
+        # 1-4. "컨베어" 단독 + 배차/차량 → 시뮬레이터 유도 대상 (conveyor)
+        if any(k in combined for k in ["컨베어", "컨베이어"]):
+            if not any(k in combined for k in ["담당", "누구", "연락"]):
+                return "conveyor"
+
+        # 1-5. "크롤러" 단독
+        if "크롤러" in combined and not any(k in combined for k in ["담당", "누구", "연락"]):
+            return "crawler"
+
+        # ══════════════════════════════════════════
+        # 2단계: 구조적 컨텍스트 판별 (명확한 맥락 키워드만 유지)
+        # ══════════════════════════════════════════
+
+        # 2-1. 기사 노선/동선 — 이름 없이도 맥락이 명확한 것만
+        if any(k in combined for k in ["납품 동선", "납품동선", "기사 노선", "납품 노선",
+                                         "지입기사", "지입 기사", "납품경로"]):
             return "driver_route"
 
-        # 주름혹벨트 도메인 (컨베어보다 먼저 체크)
-        sidewall_kw = ["주름혹", "sidewall", "SW ", "ME SW", "우든박스", "우드박스"]
-        if any(k in combined for k in sidewall_kw):
-            return "sidewall"
-
-        # 컨베어벨트 도메인
-        # [문제2 수정] "컨베어 담당" 질문이 conveyor로 빠지지 않도록
-        # → 위에서 personnel_strong_kw로 먼저 걸러지므로 여기선 기술 질문만 해당
-        conveyor_kw = ["컨베어벨트", "컨베이어", "직경", "롤 직경", "포규격", "심체수",
-                       "상고무", "하고무", "코팅후포두께", "EP포", "NN포",
-                       "컨베어 규격", "컨베어 자재",
-                       "컨베어 배차", "컨베이어 배차", "컨베어벨트 배차",
-                       "컨베어 차량", "컨베어 몇 대", "컨베이어 몇 대",
-                       "롤 배차", "ROLL 배차", "roll 배차",
-                       "컨베어 톤", "컨베이어 톤"]
-        if any(k in combined for k in conveyor_kw):
-            return "conveyor"
-        # 컨베어 단독 사용 (담당/인원 키워드 없을 때만)
-        if "컨베어" in combined and not any(k in combined for k in ["담당", "누구", "연락", "직책", "책임"]):
-            return "conveyor"
-
-        # 크롤러/러버트랙 도메인
-        # [문제2 수정] "크롤러 담당" 질문이 crawler로 빠지지 않도록
-        # → 위에서 personnel_strong_kw로 먼저 걸러지므로 여기선 기술 질문만 해당
-        crawler_kw = ["러버트랙", "Rubber Track", "크롤러 배차", "크롤러 규격",
-                      "크롤러 중량", "크롤러 자재", "RT 자재", "크롤러 러버"]
-        if any(k in combined for k in crawler_kw):
-            return "crawler"
-        # 크롤러 단독 사용 (담당/인원 키워드 없을 때만)
-        if "크롤러" in combined and not any(k in combined for k in ["담당", "누구", "연락", "직책", "책임"]):
-            return "crawler"
-
-        # 수출 포장 도메인
-        export_kw = ["포장량", "컨테이너", "B01", "B02", "N18", "N19", "마대",
-                     "CBM", "cbm", "수출 파렛트", "전동수출", "수출 박스"]
-        if any(k in combined for k in export_kw):
+        # 2-2. 수출 포장 — B01/B02 같은 사내 전용 코드는 LLM이 모름
+        if any(k in combined for k in ["B01", "B02", "N18", "N19", "CBM", "cbm",
+                                         "수출 파렛트", "전동수출", "컨테이너", "수출 포장량"]):
             return "export"
 
-        # 인원/담당자 도메인 (약한 키워드)
-        personnel_kw = [
-            "인원", "담당", "누구", "연락처", "전화번호", "내선",
-            "팀원", "팀장", "직책", "관리자",
-            "지게차", "외주업체", "물류팀 현황", "물류팀 인원", "몇 명",
-        ]
-        if any(k in combined for k in personnel_kw):
-            return "personnel"
+        # 2-3. 파렛트/박스 규격 조회 (배차/운송 맥락 없을 때만)
+        _is_dispatch = any(k in query for k in ["배차", "차량", "운송", "몇 톤", "몇톤"])
+        if any(k in combined for k in ["PLT", "plt", "파렛트", "박스 규격", "PE포", "받침목"]):
+            if not _is_dispatch:
+                return "pallet_box"
 
-        return "general"
+        # 2-4. 차량 제원 명시 질문
+        if any(k in combined for k in ["적재함 길이", "적재함 폭", "차량 제원", "차량제원",
+                                         "톤수별 차량", "차량 규격"]):
+            return "vehicle"
+
+        # ══════════════════════════════════════════
+        # 3단계: LLM 경량 분류 (1~2단계 미판별 → 의도 파악 필요)
+        # ══════════════════════════════════════════
+        # 대상: personnel / operation_rule / domestic / general
+        # 이 4개는 표현이 너무 다양해서 키워드로 커버 불가
+        try:
+            classify_prompt = f"""당신은 물류팀 사내 챗봇의 질문 분류기입니다. 반드시 아래 4가지 중 하나만 영어로 답하세요. 다른 말은 절대 금지.
+
+personnel      : 팀원/담당자/기사 정보 (연락처, 인원현황, 누가 담당인지, 지게차 기사 현황)
+operation_rule : 물류 업무 절차/규칙 (배차신청, 지게차 요청, 마감시간, 출고변경, 포장분단, 운임기준, 짐 이동)
+domestic       : 국내 운송수단 선택/비교 (화물vs택배vs직송, 운임비교, 어떻게 보낼지)
+general        : 위 3가지 외
+
+예시) "이정희 주임 연락처" → personnel
+예시) "지게차 어떻게 신청해" → operation_rule
+예시) "3PLT 배차 요청 몇 톤 차량" → operation_rule
+예시) "인천까지 배차 언제 신청" → operation_rule
+예시) "택배vs직송 어떤게 나을까" → domestic
+
+질문: {query}
+답:"""
+
+            raw_intent = self.llm._call(classify_prompt).strip().lower()
+
+            # 응답 파싱 (LLM이 여분 텍스트를 붙일 수 있으므로 포함 검사)
+            if "personnel" in raw_intent:
+                domain = "personnel"
+            elif "operation" in raw_intent:
+                domain = "operation_rule"
+            elif "domestic" in raw_intent:
+                domain = "domestic"
+            else:
+                domain = "general"
+
+            logger.info(f"LLM 도메인 분류: '{raw_intent}' → {domain}")
+            return domain
+
+        except Exception as e:
+            logger.warning(f"LLM 분류 실패({e}) → general 폴백")
+            return "general"
 
     def fetch_whole_docs(self, sheet_names: list, limit: int = 5):
         """
@@ -1335,12 +1304,13 @@ class RAGChainWrapper:
                 op_docs = self.fetch_whole_docs(["물류팀 운영 규칙"], limit=100)  # summary 1개 + Q&A 전체 (51개 이상 대비)
                 if op_docs:
                     # summary 청크를 맨 앞으로 정렬 → context 앞부분에 전체 Q&A 요약 배치
-                    summary_first = sorted(op_docs, key=lambda x: 0 if x[0].metadata.get("type") == "summary" else 1)
+                    # 개별 Q&A를 앞에, summary를 뒤에 배치 → 유사 Q&A가 context 앞부분에 오도록
+                    qa_first = sorted(op_docs, key=lambda x: 1 if x[0].metadata.get("type") == "summary" else 0)
                     existing = {doc.page_content[:50] for doc, _ in filtered_results}
                     added = 0
-                    for doc, score in summary_first:
+                    for doc, score in qa_first:
                         if doc.page_content[:50] not in existing:
-                            filtered_results.insert(0, (doc, score))  # 앞에 삽입
+                            filtered_results.append((doc, score))  # 뒤에 추가 (Q&A 먼저, summary 나중)
                             existing.add(doc.page_content[:50])
                             added += 1
                     logger.info(f"general/operation_rule 운영규칙 보완: +{added}개")
@@ -1519,7 +1489,11 @@ class LoggingSystem:
             payload = {
                 "query": query,
                 "answer": answer,
-                "sources": json.dumps(sources, ensure_ascii=False),
+                # page_content 제외 → 출처 메타정보만 저장 (용량 최적화)
+                "sources": json.dumps([
+                    {k: v for k, v in s.items() if k != "page_content"}
+                    for s in (sources or [])
+                ], ensure_ascii=False),
                 "timestamp": now.isoformat(),
                 "hour": hour if hour is not None else now.hour,          # 시간대별 분포
                 "answer_length": len(answer),
@@ -1595,7 +1569,11 @@ class LearningSystem:
             metadata = {
                 "query": query,
                 "answer": answer,
-                "sources": json.dumps(sources, ensure_ascii=False),
+                # page_content 제외 → 출처 메타정보만 저장 (용량 최적화)
+                "sources": json.dumps([
+                    {k: v for k, v in s.items() if k != "page_content"}
+                    for s in (sources or [])
+                ], ensure_ascii=False),
                 "timestamp": datetime.now().isoformat(),
                 "feedback_score": feedback_score or 1.0,
                 "usage_count": 1,
@@ -1627,7 +1605,11 @@ class LearningSystem:
             metadata = {
                 "query": query,
                 "answer": answer,
-                "sources": json.dumps(sources, ensure_ascii=False),
+                # page_content 제외 → 출처 메타정보만 저장 (용량 최적화)
+                "sources": json.dumps([
+                    {k: v for k, v in s.items() if k != "page_content"}
+                    for s in (sources or [])
+                ], ensure_ascii=False),
                 "timestamp": timestamp,
                 "feedback_type": "bad",
                 "reason": reason,
@@ -2628,6 +2610,55 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
                 return cached_data['answer'], cached_data['sources'], cached_data.get('has_table', False)
     
     # ── 시뮬레이터 유도 체크 ─────────────────────────────────────
+    # ── 중량 기반 차량 톤수 직접 계산 ──────────────────────────────────
+    # 질문에 kg/ton 중량이 명시된 경우 차량 데이터 기준으로 즉시 답변
+    import re as _re
+    _WEIGHT_KG_PAT  = _re.compile(r'(\d+(?:\.\d+)?)\s*(?:KG|kg|킬로그램)', _re.IGNORECASE)
+    _WEIGHT_TON_PAT = _re.compile(r'(\d+(?:\.\d+)?)\s*(?:톤|TON|ton)(?!\s*차량|\s*트럭|\s*짜리\s*차|\s*급\s*차)', _re.IGNORECASE)
+    _PLT_CAR_KW = ["PLT","plt","파렛트","팔레트","차량","배차","몇 톤","몇톤","운송","운반"]
+    _is_car_query = any(k in query for k in _PLT_CAR_KW)
+
+    _weight_kg = None
+    _kg_hit  = _WEIGHT_KG_PAT.search(query)
+    _ton_hit = _WEIGHT_TON_PAT.search(query)
+    if _kg_hit:
+        _weight_kg = float(_kg_hit.group(1))
+    elif _ton_hit and _is_car_query:
+        _weight_kg = float(_ton_hit.group(1)) * 1000
+
+    if _weight_kg and _is_car_query:
+        _wt = _weight_kg / 1000
+        _CAR_TABLE = [
+            (1.32,  "1톤(1.2톤)",  "~1.32톤"),
+            (2.75,  "2.5톤",       "1.33~2.75톤"),
+            (3.85,  "3.5톤",       "2.76~3.85톤"),
+            (5.50,  "5톤",         "3.86~5.5톤"),
+            (8.20,  "8톤",         "5.6~8.2톤"),
+            (12.0,  "11톤",        "8.3~12톤"),
+            (19.0,  "18톤",        "12.1~19톤"),
+            (25.5,  "25톤",        "19.1~25.5톤"),
+            (float("inf"), "트레일러", "25.5톤 초과"),
+        ]
+        _rec_car   = next((car for lim,car,_ in _CAR_TABLE if _wt<=lim), "트레일러")
+        _rec_range = next((rng for lim,_,rng in _CAR_TABLE if _wt<=lim), "")
+        _wt_answer = (
+            f"**총 중량 {_weight_kg:,.0f}kg({_wt:.3f}톤)** 기준으로 안내드립니다.\n\n"
+            f"| 항목 | 내용 |\n|---|---|\n"
+            f"| 📦 입력 중량 | {_weight_kg:,.0f}kg ({_wt:.3f}톤) |\n"
+            f"| 🚛 권장 차량 | **{_rec_car}** |\n"
+            f"| 📋 해당 중량 범위 | {_rec_range} |\n\n"
+            f"※ 중량 외 **부피(길이×폭×높이)** 도 차량 선택에 영향을 줍니다. "
+            f"정확한 배차는 담당자에게 문의하시거나 좌측 **[국내운임비교 시뮬레이터]** 를 이용해주세요."
+        )
+        logging_system.log_answer(
+            query=query, answer=_wt_answer, sources=[],
+            metadata={"weight_calc": True, "weight_kg": _weight_kg},
+            team=team, response_ms=int((time.time()-_start_ts)*1000),
+            domain="weight_calc", session_turn=_session_turn, hour=_hour,
+        )
+        return _wt_answer, [], False
+    # ─────────────────────────────────────────────────────────────────
+
     guide_msg = check_simulator_intent(query)
     if guide_msg:
         logging_system.log_answer(
@@ -2710,7 +2741,7 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
 
             _domain_for_limit = rag_chain._detect_domain(query)
             if _domain_for_limit in ("driver_route", "operation_rule"):
-                _ctx_limit = 8000  # 운영규칙 summary(~5500자) + 개별 청크 여유분
+                _ctx_limit = 14000  # summary(~7000자) + 개별 Q&A 청크 여유분
             elif _domain_for_limit in ("general", "personnel"):
                 _ctx_limit = 8000  # Fix: 지게차 기사 등 운영규칙+현황 동시 참조 필요
             else:
@@ -2758,8 +2789,48 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
                 if intent == "ROUTE_LOOKUP":
                     # 노선 조회 → Python 포맷팅 (기존 방식)
                     answer = _format_driver_route_answer(query, context_text)
+                elif intent == "GENERAL_INFO":
+                    # 기사 기본정보(연락처/소속/차량) → DRIVER_INFO에서 직접 추출
+                    DRIVER_INFO_MAP = {
+                        "김병일": {"tel":"010-3587-4581","car":"3.5톤 카고","area":"부산·경남권","base":"부산공장"},
+                        "김영철": {"tel":"010-7123-6231","car":"1톤 카고",  "area":"울산·마산·창원권","base":"부산공장"},
+                        "이용구": {"tel":"010-9263-4190","car":"2.5톤 카고","area":"서울·경기·인천권","base":"중부물류센터"},
+                        "심효섭": {"tel":"010-5291-6593","car":"2.5톤 카고","area":"서울 도심권","base":"중부물류센터"},
+                    }
+                    target = next((n for n in DRIVER_INFO_MAP if n in query), None)
+                    if target:
+                        d = DRIVER_INFO_MAP[target]
+                        answer = (
+                            f"**{target} 기사** 기본 정보입니다.\n\n"
+                            f"| 항목 | 내용 |\n|---|---|\n"
+                            f"| 📱 연락처 | {d['tel']} |\n"
+                            f"| 🚛 차량 | {d['car']} |\n"
+                            f"| 📍 담당 권역 | {d['area']} |\n"
+                            f"| 🏭 소속 | {d['base']} |"
+                        )
+                    else:
+                        # 특정 기사 미지정 → scope 기반 필터링
+                        _scope_busan = any(k in query for k in ["부산","부산공장","부산 기사"])
+                        _scope_seoul = any(k in query for k in ["서울","중부","중부물류","수도권"])
+
+                        if _scope_busan and not _scope_seoul:
+                            _filtered = {n:d for n,d in DRIVER_INFO_MAP.items() if d["base"] == "부산공장"}
+                            _title = "**부산공장 지입기사 기본 정보**"
+                        elif _scope_seoul and not _scope_busan:
+                            _filtered = {n:d for n,d in DRIVER_INFO_MAP.items() if d["base"] == "중부물류센터"}
+                            _title = "**서울(중부물류센터) 지입기사 기본 정보**"
+                        else:
+                            _filtered = DRIVER_INFO_MAP
+                            _title = "**지입기사 전체 기본 정보**"
+
+                        lines_info = [f"{_title}\n",
+                                      "| 기사명 | 연락처 | 차량 | 권역 | 소속 |",
+                                      "|---|---|---|---|---|"]
+                        for name, d in _filtered.items():
+                            lines_info.append(f"| {name} | {d['tel']} | {d['car']} | {d['area']} | {d['base']} |")
+                        answer = "\n".join(lines_info)
                 else:
-                    # 비교·확인·기본정보 → 도메인 프롬프트로 LLM 답변
+                    # COMPARE_OR_CONFIRM → LLM 답변
                     _d_prompt = get_domain_prompt("driver_route")
                     formatted_prompt = _d_prompt.format(
                         context=context_text,
