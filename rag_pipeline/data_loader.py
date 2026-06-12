@@ -39,9 +39,9 @@ QDRANT_COLLECTION      = os.getenv("QDRANT_COLLECTION",      "logistics_data")
 QDRANT_HOST            = os.getenv("QDRANT_HOST",            "localhost")
 QDRANT_PORT            = int(os.getenv("QDRANT_PORT",        "6333"))
 QDRANT_API_KEY         = os.getenv("QDRANT_API_KEY",         None)
-OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "bge-m3")
+OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "granite-embedding:278m")
 OLLAMA_HOST            = os.getenv("OLLAMA_HOST",            "http://localhost:11434")
-VECTOR_DIM             = 1024
+VECTOR_DIM             = 768
 BATCH_SIZE             = 64
 
 # ── 격주 기준 앵커 (5/28이 속한 주 월요일) ──────────────────────
@@ -521,42 +521,57 @@ def load_sidewall_data(ws) -> List[Dict]:
 
 
 def load_personnel_data(ws) -> List[Dict]:
-    """물류팀 현황 데이터 → 팀원별 청크 + 전체 요약 청크"""
+    """물류팀 현황 데이터 → 팀원별 청크 + 전체 요약 청크
+    컬럼: 구분 / 성명 / 직책 / 전화번호 / 담당 공정 및 업무 범위 / 부재시 대응자
+    """
     docs = []
     rows = list(ws.iter_rows(values_only=True))
-    # 헤더: 구분 / 성명 / 직책 / 전화번호 / 담당 공정 및 업무 범위
+
+    # 헤더에서 '부재시 대응자' 컬럼 인덱스 동적 탐지
+    header = [str(c).strip() if c else "" for c in rows[0]]
+    absence_col = None
+    for i, h in enumerate(header):
+        if "부재" in h or "대응자" in h:
+            absence_col = i
+            break
 
     all_lines = ["[물류팀 현황 - 전체 목록]",
-                 "| 구분 | 성명 | 직책 | 내선번호 | 담당공정 |",
-                 "|-----|-----|-----|--------|--------|"]
+                 "| 구분 | 성명 | 직책 | 내선번호 | 담당공정 | 부재시 대응자 |",
+                 "|-----|-----|-----|--------|--------|------------|"]
 
     for row in rows[1:]:
         if not row[1]: continue
-        div   = _clean(row[0])
-        name  = _clean(row[1])
-        pos   = _clean(row[2])
-        tel   = _clean(row[3])
-        duty  = _clean(row[4])
+        div     = _clean(row[0])
+        name    = _clean(row[1])
+        pos     = _clean(row[2])
+        tel     = _clean(row[3])
+        duty    = _clean(row[4])
+        absence = _clean(row[absence_col]) if absence_col and absence_col < len(row) and row[absence_col] else ""
 
         if not name: continue
 
+        # 부재 대응자 정보 포함 텍스트 생성
+        absence_line = f"\n부재시 대응자: {absence}" if absence else ""
         text = (f"[물류팀 현황 | {name} {pos}]\n"
                 f"구분: {div} | 성명: {name} | 직책: {pos}\n"
                 f"내선번호: {tel}\n"
-                f"담당공정/업무: {duty}")
+                f"담당공정/업무: {duty}"
+                f"{absence_line}")
+
         docs.append({
             "text": text,
             "metadata": {
-                "domain":  "personnel",
-                "name":    name,
+                "domain":   "personnel",
+                "name":     name,
                 "position": pos,
-                "tel":     tel,
-                "duty":    duty,
+                "tel":      tel,
+                "duty":     duty,
                 "division": div,
-                "source":  "물류팀 현황 데이터",
+                "absence":  absence,
+                "source":   "물류팀 현황 데이터",
             }
         })
-        all_lines.append(f"| {div} | {name} | {pos} | {tel} | {duty} |")
+        all_lines.append(f"| {div} | {name} | {pos} | {tel} | {duty} | {absence} |")
 
     # 전체 요약 청크
     docs.insert(0, {"text": "\n".join(all_lines),

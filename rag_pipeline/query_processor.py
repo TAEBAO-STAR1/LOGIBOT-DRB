@@ -58,7 +58,7 @@ OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "granite-embedding:
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 # 캐시 설정
-CACHE_TTL = 300
+CACHE_TTL = 600  # 10분 — 같은 질문 반복 시 일관된 답변 보장
 response_cache = {}
 cache_lock = threading.Lock()
 
@@ -100,9 +100,7 @@ SIMULATOR_GUIDE = {
             "배차해줘", "배차해 줘", "배차 부탁",
         ],
         "msg": (
-            "💡 **컨베어벨트 배차 계산은 시뮬레이터를 이용해주세요!**\n\n"
-            "자재코드·길이(m)·롤 수를 입력하면 롤 직경과 적합 차량을 자동 계산합니다.\n"
-            "좌측 메뉴 → **[컨베어벨트배차 시뮬레이터]** 를 클릭해보세요."
+            "💡 **해당 내용은 시뮬레이터를 이용해주세요!**\n\n좌측 메뉴의 **[시뮬레이터]** 를 클릭하시면 정확한 계산 결과를 확인하실 수 있습니다."
         ),
     },
     "국내운임비교": {
@@ -117,14 +115,12 @@ SIMULATOR_GUIDE = {
             "kg 운송", "ton 운송", "톤 운송",
             "kg 배차", "ton 배차",
             "최적의 배차", "최적 배차", "배차를 알려", "배차 알려줘",
-            "운송 방법", "운반 방법", "어떻게 보내", "어떤 차량으로",
-            "직송이야", "화물이야", "택배야", "화물로 보내", "직송으로",
+            "운송 방법", "운반 방법", "화물 어떻게 보내", "택배 어떻게 보내",
+            "직송이야", "화물이야", "택배야", "화물로 보내",
 
         ],
         "msg": (
-            "💡 **국내 운임 비교는 시뮬레이터를 이용해주세요!**\n\n"
-            "지역·중량을 입력하면 화물/택배/직송 중 최적 운송방식과 운임을 자동 계산합니다.\n"
-            "좌측 메뉴 → **[국내운임비교 시뮬레이터]** 를 클릭해보세요."
+            "💡 **해당 내용은 시뮬레이터를 이용해주세요!**\n\n좌측 메뉴의 **[시뮬레이터]** 를 클릭하시면 정확한 계산 결과를 확인하실 수 있습니다."
         ),
     },
     "수출포장량": {
@@ -132,11 +128,14 @@ SIMULATOR_GUIDE = {
             "박스 몇 개", "몇 박스", "수출 포장 몇",
             "650 몇개", "1090 몇개", "마대 몇개", "박스 수량 계산",
             "몇 박스 나와", "몇개 나와",
+            # 수출 포장량 계산 요청 패턴
+            "수출포장량", "수출 포장량", "포장량 산출", "포장량 계산",
+            "자재그룹별", "박스로 포장", "kg 포장", "포장할때",
+            "포장 산출", "박스 산출", "마대 산출",
+            "수출 박스", "650박스", "1090박스",
         ],
         "msg": (
-            "💡 **수출 포장량 계산은 시뮬레이터를 이용해주세요!**\n\n"
-            "자재그룹·중량을 입력하면 자동으로 계산됩니다.\n"
-            "좌측 메뉴 → **[수출포장량 시뮬레이터]** 를 클릭해보세요."
+            "💡 **해당 내용은 시뮬레이터를 이용해주세요!**\n\n좌측 메뉴의 **[시뮬레이터]** 를 클릭하시면 정확한 계산 결과를 확인하실 수 있습니다."
         ),
     },
     "국내최적배차": {
@@ -151,9 +150,7 @@ SIMULATOR_GUIDE = {
             "포장단위 배차", "중량 배차 차량", "출고 차량",
         ],
         "msg": (
-            "💡 **크롤러 배차 계산은 시뮬레이터를 이용해주세요!**\n\n"
-            "자재코드·수량을 입력하면 적정 차량을 자동 추천합니다.\n"
-            "좌측 메뉴 → **[국내최적배차 시뮬레이터]** 를 클릭해보세요."
+            "💡 **해당 내용은 시뮬레이터를 이용해주세요!**\n\n좌측 메뉴의 **[시뮬레이터]** 를 클릭하시면 정확한 계산 결과를 확인하실 수 있습니다."
         ),
     },
 }
@@ -163,14 +160,10 @@ def check_simulator_intent(query: str) -> str | None:
     import re as _re
     q = query.strip()
 
-    # ── 1) 키워드 기반 시뮬레이터 유도 (기존 방식) ───────────────────
-    for sim_name, info in SIMULATOR_GUIDE.items():
-        if any(kw in q for kw in info["keywords"]):
-            return info["msg"]
-
-    # ── 2) 자재코드 + 배차/차량 맥락 → 시뮬레이터 자동 유도 ──────────
+    # ── 1) 자재코드 + 배차/차량 맥락 → 시뮬레이터 자동 유도 (최우선) ──
+    # 키워드보다 먼저 체크: 자재코드가 있으면 제품 유형으로 정확하게 유도
     # 자재코드 패턴: 7자리 숫자
-    _code_pat = _re.search(r"\b(\d{7})\b", q)
+    _code_pat = _re.search(r"(?<!\d)(\d{7})(?!\d)", q)
     if _code_pat:
         _code = int(_code_pat.group(1))
         # 배차/차량 맥락 키워드
@@ -187,23 +180,22 @@ def check_simulator_intent(query: str) -> str | None:
             # 수출 코드: B01/B02/N18/N19 시작
             if 6000000 <= _code <= 6999999:
                 return (
-                    "💡 **크롤러 러버트랙 배차 계산은 시뮬레이터를 이용해주세요!**\n\n"
-                    "자재코드·수량을 입력하면 중량·PLT 수·적정 차량을 자동 계산합니다.\n"
-                    "좌측 메뉴 → **[국내최적배차 시뮬레이터]** 를 클릭해보세요."
+                    "💡 **해당 내용은 시뮬레이터를 이용해주세요!**\n\n좌측 메뉴의 **[시뮬레이터]** 를 클릭하시면 정확한 계산 결과를 확인하실 수 있습니다."
                 )
             elif 1000000 <= _code <= 1999999 or 9000000 <= _code <= 9099999:
                 return (
-                    "💡 **컨베어벨트 배차 계산은 시뮬레이터를 이용해주세요!**\n\n"
-                    "자재코드·길이(m)·롤 수를 입력하면 롤 직경과 적합 차량을 자동 계산합니다.\n"
-                    "좌측 메뉴 → **[컨베어벨트배차 시뮬레이터]** 를 클릭해보세요."
+                    "💡 **해당 내용은 시뮬레이터를 이용해주세요!**\n\n좌측 메뉴의 **[시뮬레이터]** 를 클릭하시면 정확한 계산 결과를 확인하실 수 있습니다."
                 )
             else:
                 # 코드 범위 불명확 → 일반 배차 시뮬레이터 유도
                 return (
-                    "💡 **배차 차량 계산은 시뮬레이터를 이용해주세요!**\n\n"
-                    "자재코드·수량을 입력하면 적정 차량을 자동 추천합니다.\n"
-                    "좌측 메뉴 → **[국내최적배차 시뮬레이터]** 를 클릭해보세요."
+                    "💡 **해당 내용은 시뮬레이터를 이용해주세요!**\n\n좌측 메뉴의 **[시뮬레이터]** 를 클릭하시면 정확한 계산 결과를 확인하실 수 있습니다."
                 )
+
+    # ── 2) 키워드 기반 시뮬레이터 유도 (자재코드 없을 때) ────────────
+    for sim_name, info in SIMULATOR_GUIDE.items():
+        if any(kw in q for kw in info["keywords"]):
+            return info["msg"]
 
     return None
 
@@ -343,7 +335,10 @@ _DOMAIN_RULES = {
 2. 요일별 도착지가 다른 것 = 그날의 납품 코스(동선)가 다름
 3. 모든 기사(부산공장 + 중부물류센터) 빠짐없이 포함
 4. 기사별 요일별 납품 동선 표: | 요일 | 납품 동선 |
-5. 이번 주 운행 기사 판별: 격주 앵커(2026-05-25 = B주 = 이용구) 기준""",
+5. 이번 주 운행 기사 판별: 격주 앵커(2026-05-25 = B주 = 이용구) 기준
+6. 거래처 관련 질문 ("○○ 거래처 담당자", "○○에 납품 담당", "거래처 문의처" 등):
+   → 납품 동선 데이터의 거래처명은 기사 노선 확인용이며,
+     거래처 담당자·클레임·문의는 물류팀 담당자인 **김동우 팀원 (내선: 9133)**에게 문의 안내""",
 
     "personnel": """
 [담당자 조회 전용 규칙]
@@ -371,17 +366,21 @@ _DOMAIN_RULES = {
 
     "operation_rule": """
 [운영 규칙 전용]
-1. Q&A 데이터에서 질문과 가장 유사한 답변을 그대로 제시
-2. 데이터에 없는 내용은 "물류팀 담당자에게 문의해 주세요"
-3. 시간·마감 관련: 구체적인 시각까지 정확히 전달
-4. 추가 안내 금지: 데이터에 없는 절차·주의사항을 임의로 덧붙이지 마세요""",
+1. Q&A 데이터에서 질문과 가장 유사한 답변을 찾아 제시
+   - 질문과 완전히 동일하지 않아도 됨. 의미상 유사한 Q&A를 적극 활용
+   - 여러 Q&A에 걸친 내용이면 통합해서 하나의 답변으로 제시
+2. 시간·마감 관련: 구체적인 시각까지 정확히 전달
+3. 추가 안내 금지: 데이터에 없는 절차·주의사항을 임의로 덧붙이지 마세요
+4. 데이터에 완전히 없는 내용만 "물류팀 담당자에게 문의해 주세요" 안내""",
 
     "general": """
 [일반 규칙]
-1. 여러 데이터에 걸친 정보는 하나로 통합해서 자연스럽게 설명
-2. 비교/목록 데이터는 Markdown 표로 정리
-3. 수량 질문: 데이터를 빠짐없이 세어 정확한 합계 제시
-4. 자재코드(7자리 숫자) 단독 입력: 자재 종류 자동 식별 후 기본정보 제시""",
+1. [참고 데이터]에 질문과 관련된 Q&A가 있으면 그 답변을 최우선으로 활용
+2. 여러 데이터에 걸친 정보는 하나로 통합해서 자연스럽게 설명
+3. 비교/목록 데이터는 Markdown 표로 정리
+4. 수량 질문: 데이터를 빠짐없이 세어 정확한 합계 제시
+5. 자재코드(7자리 숫자) 단독 입력: 자재 종류 자동 식별 후 기본정보 제시
+6. [참고 데이터]에 관련 내용이 없으면 "해당 정보를 내부 데이터에서 찾을 수 없습니다" 안내""",
 }
 
 _PROMPT_BASE = """{system_role}
@@ -917,6 +916,24 @@ class RAGChainWrapper:
         if any(n in query for n in DRIVER_NAMES):
             return "driver_route"
 
+        # 1-1-b. 노선 거래처명 감지 → driver_route
+        # 거래처명은 사내 고유 명칭이라 LLM이 모를 수 있음
+        _ROUTE_CUSTOMERS = [
+            "GM대우 KD", "대신화물", "동양 ENG", "동양알앤비", "동일벨트",
+            "동일벨트산업", "동일부품", "동일삼광산업", "동일상공사", "동일상사",
+            "동일알앤씨", "동일종합물산", "동일종합산업", "동일종합상사", "동일팬벨트",
+            "동일팬유통", "명진", "모던테크", "반도상사", "삼흥정밀",
+            "서울팬벨트", "성보산업사", "성우상사", "승리상사",
+            "신우기업", "신흥알앤테크", "신흥폴리테크", "유니온벨티노", "유일상사",
+            "인왕산업", "제일산업사", "조선통상", "조일상공", "태영산업사",
+            "한국벨트", "한길산업", "현대내자", "현대테크젠", "흥국상사", "흥진사",
+        ]
+        # 공백 제거 후 비교 (예: "현대 테크젠" → "현대테크젠")
+        _q_no_space = query.replace(" ", "")
+        if any(k.replace(" ", "") in _q_no_space for k in _ROUTE_CUSTOMERS):
+            logger.info(f"노선 거래처명 감지 → 도메인: driver_route")
+            return "driver_route"
+
         # 1-2. 제품 고유명 → 기술 도메인 (오분류 시 계산 오답 위험)
         if any(k in combined for k in ["컨베어벨트", "컨베이어벨트", "컨베이어 벨트"]):
             # 담당자 질문 제외
@@ -959,12 +976,13 @@ class RAGChainWrapper:
 
         # 2-2. 수출 포장 — B01/B02 같은 사내 전용 코드는 LLM이 모름
         if any(k in combined for k in ["B01", "B02", "N18", "N19", "CBM", "cbm",
-                                         "수출 파렛트", "전동수출", "컨테이너", "수출 포장량"]):
+                                         "수출 파렛트", "컨테이너", "수출 포장량"]):
             return "export"
 
         # 2-3. 파렛트/박스 규격 조회 (배차/운송 맥락 없을 때만)
         _is_dispatch = any(k in query for k in ["배차", "차량", "운송", "몇 톤", "몇톤"])
-        if any(k in combined for k in ["PLT", "plt", "파렛트", "박스 규격", "PE포", "받침목"]):
+        if any(k in combined for k in ["PLT", "plt", "파렛트", "박스 규격", "PE포", "받침목",
+                                         "포장자재", "포장재", "포장 종류", "포장 자재"]):
             if not _is_dispatch:
                 return "pallet_box"
 
@@ -982,8 +1000,13 @@ class RAGChainWrapper:
             classify_prompt = f"""당신은 물류팀 사내 챗봇의 질문 분류기입니다. 반드시 아래 4가지 중 하나만 영어로 답하세요. 다른 말은 절대 금지.
 
 personnel      : 팀원/담당자/기사 정보 (연락처, 인원현황, 누가 담당인지, 지게차 기사 현황)
-operation_rule : 물류 업무 절차/규칙 (배차신청, 지게차 요청, 마감시간, 출고변경, 포장분단, 운임기준, 짐 이동)
-domestic       : 국내 운송수단 선택/비교 (화물vs택배vs직송, 운임비교, 어떻게 보낼지)
+operation_rule : 물류 업무 절차·규칙·방법 질문 전반. 아래를 모두 포함:
+                 마감시간(주문/출고/배차/직배차/용차/직송), 배차 신청·절차,
+                 지게차 요청, 출고 변경·취소, 포장 방법·분단, 운임 기준,
+                 샘플 발송·수령, 창고·보관, 짐 이동, 업무 문의 등
+                 ※ "직배차량","직배차","고정 용차","직배"처럼 표현이 달라도
+                   배차·마감·출고 맥락이면 operation_rule
+domestic       : 국내 운송수단 선택·비교 (화물vs택배vs직송, 운임비교, 어떻게 보낼지)
 general        : 위 3가지 외
 
 예시) "이정희 주임 연락처" → personnel
@@ -991,11 +1014,32 @@ general        : 위 3가지 외
 예시) "3PLT 배차 요청 몇 톤 차량" → operation_rule
 예시) "인천까지 배차 언제 신청" → operation_rule
 예시) "택배vs직송 어떤게 나을까" → domestic
+예시) "샘플을 보내려고 하는데 어떻게 해야해" → operation_rule
+예시) "벨트 샘플 수령 방법" → operation_rule
+예시) "샘플 발송 프로세스" → operation_rule
+예시) "직배차량 마감시간" → operation_rule
+예시) "직배차 마감 언제야" → operation_rule
+예시) "고정 용차 마감시간" → operation_rule
+예시) "직송으로 보낼때 추가 운임 항목" → operation_rule
+예시) "직송 추가운임 발생하는 경우" → operation_rule
+예시) "직송으로 보내면 얼마야" → domestic
+예시) "3PLT 운송 몇톤 차량 배차요청" → operation_rule
+예시) "파렛트 운송 차량 톤수 알려줘" → operation_rule
+예시) "제주도에 배송하려고 하는데 어떻게 해야해" → operation_rule
+예시) "제주도 배송 되나요" → operation_rule
+예시) "동양알앤비 납품 담당자 누구야" → driver_route
+예시) "유일상사에 납품하려는데 문의처" → driver_route
 
 질문: {query}
 답:"""
 
-            raw_intent = self.llm._call(classify_prompt).strip().lower()
+            # 도메인 분류는 결정적 응답 필요 → temperature=0 강제
+            _orig_temp = self.llm.temperature
+            self.llm.temperature = 0.0
+            try:
+                raw_intent = self.llm._call(classify_prompt).strip().lower()
+            finally:
+                self.llm.temperature = _orig_temp
 
             # 응답 파싱 (LLM이 여분 텍스트를 붙일 수 있으므로 포함 검사)
             if "personnel" in raw_intent:
@@ -1235,17 +1279,17 @@ general        : 위 3가지 외
             # ── 도메인별 유사도 임계값 차등 적용 ─────────────────────────────
             _domain_now = self._detect_domain(query)
             SCORE_THRESHOLD = {
-                "conveyor"       : 0.20,  # Fix: V4(0.15) 수준으로 완화
-                "crawler"        : 0.20,
-                "sidewall"       : 0.20,
-                "domestic"       : 0.20,
-                "export"         : 0.20,
-                "personnel"      : 0.15,
-                "operation_rule" : 0.15,
-                "vehicle"        : 0.15,
-                "pallet_box"     : 0.15,  # Fix: 파렛트/박스 도메인
-                "driver_route"   : 0.15,
-                "general"        : 0.15,
+                "conveyor"       : 0.15,
+                "crawler"        : 0.15,
+                "sidewall"       : 0.15,
+                "domestic"       : 0.15,
+                "export"         : 0.15,
+                "personnel"      : 0.12,
+                "operation_rule" : 0.12,
+                "vehicle"        : 0.12,
+                "pallet_box"     : 0.12,
+                "driver_route"   : 0.12,
+                "general"        : 0.12,
             }
             _threshold = SCORE_THRESHOLD.get(_domain_now, 0.35)
 
@@ -1314,6 +1358,21 @@ general        : 위 3가지 외
                             existing.add(doc.page_content[:50])
                             added += 1
                     logger.info(f"general/operation_rule 운영규칙 보완: +{added}개")
+
+                    # 샘플 관련 질문이면 샘플 문서를 컨텍스트 앞으로 강제 이동
+                    _sample_kw = ["샘플", "sample", "Sample"]
+                    if any(k in query for k in _sample_kw):
+                        _sample_docs = [
+                            (d, s) for d, s in filtered_results
+                            if "샘플" in d.page_content
+                        ]
+                        _other_docs = [
+                            (d, s) for d, s in filtered_results
+                            if "샘플" not in d.page_content
+                        ]
+                        filtered_results = _sample_docs + _other_docs
+                        if _sample_docs:
+                            logger.info(f"샘플 문서 {len(_sample_docs)}개 컨텍스트 앞에 배치")
 
             # pallet_box 도메인 → 파렛트/박스 데이터 전체 강제 보완
             if domain == "pallet_box":
@@ -2244,6 +2303,10 @@ def _format_driver_route_answer(query: str, context_text: str) -> str:
     scope_seoul  = any(k in query for k in ["서울","중부","중부물류","수도권"])
     specific_name = next((n for n in ["김병일","김영철","이용구","심효섭"] if n in query), None)
 
+    # ── 1.5 다음주 질문 감지 ─────────────────────────────────────────────
+    NEXT_WEEK_KW = ["다음주","다음 주","내주","next week"]
+    is_next_week_query = any(k in query for k in NEXT_WEEK_KW)
+
     # ── 2. 격주 판별 ─────────────────────────────────────────────────────
     BIWEEKLY_ANCHOR_DATE = _date(2026, 5, 25)  # 5/28 적용 시작주의 월요일
     _today  = _date.today()
@@ -2251,6 +2314,21 @@ def _format_driver_route_answer(query: str, context_text: str) -> str:
     _weeks  = (_mon - BIWEEKLY_ANCHOR_DATE).days // 7
     _this_week_driver = "이용구" if _weeks % 2 == 0 else "심효섭"
     _next_week_driver = "심효섭" if _this_week_driver == "이용구" else "이용구"
+
+    # 다음주 질문 + 서울 기사 이름 지정 시 → 다음주 담당 기사로 교체
+    # 예) "다음주 이용구 기사 노선" (이번주 B주) → 심효섭 기사 노선 안내
+    _next_week_redirect_msg = ""
+    SEOUL_DRIVERS_LIST = ["이용구", "심효섭"]
+    if is_next_week_query and specific_name in SEOUL_DRIVERS_LIST:
+        _next_wg = "A" if _this_week_driver == "이용구" else "B"
+        if specific_name == _this_week_driver:
+            # 이번주 담당 기사의 다음주 노선 → 다음주엔 상대방이 담당
+            _next_week_redirect_msg = (
+                f"> 📅 다음 주({_next_wg}주)는 **{_next_week_driver} 기사**가 서울 납품을 담당합니다.\n"
+                f"> {specific_name} 기사 대신 {_next_week_driver} 기사 노선을 안내드립니다.\n"
+            )
+            specific_name = _next_week_driver  # 다음주 담당으로 교체
+        # 이미 다음주 담당 기사를 물어본 경우는 그대로
 
     # ── 3. stop_line 파싱 함수 ───────────────────────────────────────────
     def _parse_stop(line: str):
@@ -2421,9 +2499,15 @@ def _format_driver_route_answer(query: str, context_text: str) -> str:
             else:
                 return "현재 위치를 조회할 기사 이름을 포함해 질문해 주세요. (예: '김병일 기사 지금 어디?')"
 
-        if target_name in SEOUL_DRIVERS and target_name != _this_week_driver:
-            return (f"⏸️ **{target_name} 기사**는 이번 주 운행 주간이 아닙니다.\n\n"
-                    f"이번 주 서울 운행은 **{_this_week_driver} 기사** 담당입니다.")
+        # 두 기사 모두 매주 운행 (노선만 격주 교대)
+        # 이용구=B노선, 심효섭=A노선 → 항상 운행 중이므로 차단하지 않음
+        # 다만 이번주 주담당 여부를 안내
+        _is_main_this_week = (target_name in SEOUL_DRIVERS and target_name == _this_week_driver)
+        _week_notice = (
+            f"(이번 주 {_wg}주 주담당)"
+            if _is_main_this_week
+            else f"(이번 주 {_wg}주 보조노선 · 다음 주 주담당)"
+        ) if target_name in SEOUL_DRIVERS else ""
 
         target_key = next((k for k in driver_day_stops if target_name in k), None)
         if not target_key:
@@ -2460,14 +2544,18 @@ def _format_driver_route_answer(query: str, context_text: str) -> str:
                 break
         if not location_msg:
             location_msg = f"📍 **{stops_timed[-1][0][2]}** 근처"
+        _notice_line = f"\n> 📅 {_week_notice}" if _week_notice else ""
         return (f"🕐 현재 **{now.hour:02d}:{now.minute:02d}** ({today_name}) 기준\n\n"
                 f"### {target_name} 기사 예상 위치\n{location_msg}\n\n"
-                f"> ⚠️ 예상 위치는 납품 시각 기준 추정값입니다. 기사에게 직접 확인해 주세요.")
+                f"> ⚠️ 예상 위치는 납품 시각 기준 추정값입니다. 기사에게 직접 확인해 주세요."
+                f"{_notice_line}")
 
     # ── 8. 일반 노선 조회 답변 생성 ──────────────────────────────────────
     lines = []
 
     if specific_name:
+        if _next_week_redirect_msg:
+            lines.append(_next_week_redirect_msg)
         lines.append(f"**{specific_name} 기사** 납품 동선 정보입니다.\n")
     elif scope_busan and not scope_seoul:
         lines.append("**부산공장 지입기사** 납품 동선 정보입니다.\n")
@@ -2648,7 +2736,7 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
             f"| 🚛 권장 차량 | **{_rec_car}** |\n"
             f"| 📋 해당 중량 범위 | {_rec_range} |\n\n"
             f"※ 중량 외 **부피(길이×폭×높이)** 도 차량 선택에 영향을 줍니다. "
-            f"정확한 배차는 담당자에게 문의하시거나 좌측 **[국내운임비교 시뮬레이터]** 를 이용해주세요."
+            f"정확한 배차는 담당자에게 문의하시거나 좌측 **[시뮬레이터]** 를 이용해주세요."
         )
         logging_system.log_answer(
             query=query, answer=_wt_answer, sources=[],
@@ -2763,7 +2851,8 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
 선택지:
 - ROUTE_LOOKUP : 특정 기사의 납품 동선/노선/일정을 조회하는 질문
 - COMPARE_OR_CONFIRM : 비교, 확인, 예/아니오, 의견, 데이터에 없는 정보를 묻는 질문
-- GENERAL_INFO : 연락처, 소속, 차량 정보 등 기사 기본 정보 질문
+- GENERAL_INFO : 연락처, 소속, 차량 정보, 거래처 납품 문의처 등 기사 기본 정보 질문
+  ※ "거래처에 납품하려는데 누구에게 문의", "거래처 담당자" 같은 질문은 GENERAL_INFO
 
 답:"""
                 try:
