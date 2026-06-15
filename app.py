@@ -398,14 +398,54 @@ def _make_wireframe(lx, ly, lz, color="#888888"):
 # ── 컨베어벨트 3D 팝업 ──────────────────────────────────────────────────────
 @st.dialog("🎡 컨베어벨트 3D 적재 시각화", width="large")
 def show_cb_3d_popup():
-    """session_state["cb_3d_data"]에서 fig, guide_html을 읽어 렌더링."""
+    """
+    session_state["cb_3d_data"] 구조:
+      단일 차량: {"fig": Figure, "guide_html": str}
+      분할 배차: {"split": True, "groups": [...], "guide_html": str,
+                  "all_resolved": [...], "make_fig_fn": callable}
+    """
     data = st.session_state.get("cb_3d_data", {})
     if not data:
         st.warning("3D 데이터가 없습니다.")
         return
+
     st.markdown(data.get("guide_html", ""), unsafe_allow_html=True)
-    st.plotly_chart(data["fig"], use_container_width=True)
-    st.caption("💡 원통=컨베어벨트 롤 | 빨간점선=높이2.6m(로베드기준) | 마우스로 회전·확대")
+
+    if data.get("split"):
+        # ── 분할 배차: 크롤러처럼 팝업 안에서 탭 ──────────────────────
+        groups       = data["groups"]
+        all_resolved = data["all_resolved"]
+        make_fig_fn  = data["make_fig_fn"]
+
+        tab_labels = [
+            f"🚚 차량 {i+1}: {g['vehicle']['name']} ({len(g['rolls'])}롤)"
+            for i, g in enumerate(groups)
+        ]
+        tabs = st.tabs(tab_labels)
+
+        for ti, (tab, g) in enumerate(zip(tabs, groups)):
+            with tab:
+                gv  = g["vehicle"]
+                gr  = g["rolls"]
+                gwt = g["total_wt"]
+                gl  = g["total_len"]
+
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("차량",   gv["name"])
+                col_b.metric("중량",   f"{gwt/1000:.2f}t / {gv['wt']}t")
+                col_c.metric("롤",     f"{len(gr)}개 / {gl:.2f}m")
+
+                fig_t = make_fig_fn(gv, gr, all_resolved)
+                st.plotly_chart(fig_t, use_container_width=True,
+                                key=f"cb_split_3d_tab_{ti}")
+                st.caption(
+                    f"💡 차량 {ti+1}: {gv['name']} | 롤 {len(gr)}개 | "
+                    "마우스로 회전·확대"
+                )
+    else:
+        # ── 단일 차량 ────────────────────────────────────────────────────
+        st.plotly_chart(data["fig"], use_container_width=True)
+        st.caption("💡 원통=컨베어벨트 롤 | 빨간점선=높이2.6m(로베드기준) | 마우스로 회전·확대")
 
 
 # ── 3D 적재 시각화 팝업 ──────────────────────────────────────────────────────
@@ -2946,12 +2986,69 @@ with st.sidebar:
                         candidates.append({**v, "need_l": need_l, "vol_ok": vol_ok, "wt_ok": wt_ok})
 
                     ok_both = [c for c in candidates if c["vol_ok"] and c["wt_ok"]]
-                    ok_vol  = [c for c in candidates if not c["wt_ok"]]
 
+                    # ── 분할 배차 그리디 알고리즘 ────────────────────────
+                    # 롤을 하나씩 펼쳐서 최대 차량에 최대한 쌓고 넘치면 분할
+                    def _cb_split_dispatch(resolved_items, vehicles):
+                        """
+                        cb_resolved 항목을 롤 단위로 펼쳐서
+                        각 차량에 최대한 적재 후 초과 시 다음 차량으로 분할.
+                        반환: [(차량, [롤리스트], 총중량kg, 총길이m), ...]
+                        """
+                        # 롤 단위로 펼치기
+                        all_rolls = []
+                        for r in resolved_items:
+                            for ri in range(r["rolls"]):
+                                all_rolls.append({
+                                    "code": r["code"],
+                                    "dia_m": r["dia_m"],
+                                    "width_mm": r["width_mm"],
+                                    "wt_kg": r["wt_per_roll"],
+                                    "wt_per_roll": r["wt_per_roll"],
+                                    "label": f"{r['code']} 롤{ri+1}",
+                                    "color_idx": resolved_items.index(r),
+                                })
+                        # 가장 큰 차량 기준으로 그리디
+                        max_v = next((v for v in reversed(vehicles) if "트레일러" not in v["name"]), vehicles[-1])
+                        groups = []
+                        cur_rolls, cur_wt, cur_len = [], 0.0, 0.0
+                        for roll in all_rolls:
+                            try_len = cur_len + roll["dia_m"]
+                            try_wt  = cur_wt  + roll["wt_kg"]
+                            fits = (try_len <= max_v["length"] and try_wt/1000 <= max_v["wt"])
+                            if fits or not cur_rolls:
+                                cur_rolls.append(roll)
+                                cur_wt  = try_wt
+                                cur_len = try_len
+                            else:
+                                groups.append((cur_rolls[:], cur_wt, cur_len))
+                                cur_rolls = [roll]
+                                cur_wt    = roll["wt_kg"]
+                                cur_len   = roll["dia_m"]
+                        if cur_rolls:
+                            groups.append((cur_rolls, cur_wt, cur_len))
+                        # 각 그룹에 최적 차량 배정
+                        result = []
+                        for rolls, wt, ln in groups:
+                            dia_max = max(rr["dia_m"] for rr in rolls)
+                            w_max   = max(rr["width_mm"] for rr in rolls) / 1000
+                            best_v  = next(
+                                (v for v in vehicles
+                                 if v["length"] >= ln
+                                 and v["width"]  >= max(dia_max, w_max)
+                                 and wt/1000     <= v["wt"]),
+                                next((v for v in reversed(vehicles) if "트레일러" not in v["name"]), vehicles[-1])
+                            )
+                            result.append({"vehicle": best_v, "rolls": rolls,
+                                           "total_wt": wt, "total_len": ln})
+                        return result
+
+                    # ── 결과 분기 ─────────────────────────────────────────
                     if ok_both:
-                        best_cb = ok_both[0]
-                        need_l  = best_cb["need_l"]
-                        st.success(f"**추천 차량: {best_cb['name']}**")
+                        # 단일 차량으로 해결
+                        best_cb   = ok_both[0]
+                        need_l    = best_cb["need_l"]
+                        cb_groups = None   # 분할 없음
                         _height_note = ""
                         if max_dia > best_cb["height"]:
                             _ground_h = 1.2 + max_dia
@@ -2959,252 +3056,324 @@ with st.sidebar:
                                 f"  \n⚠️ 롤 직경({max_dia:.2f}m)이 적재함 높이({best_cb['height']}m)를 초과 → "
                                 f"상단 돌출 상차 | 지상 높이 약 {_ground_h:.2f}m (도로법 4.0m 이하 ✅)"
                             )
-                        st.markdown(
-                            f"📏 적재함 {best_cb['length']}m × {best_cb['width']}m | "
-                            f"⚖️ 최대 {best_cb['wt']}ton | "
-                            f"🎡 롤 1열 필요 길이 {need_l:.2f}m ({max_dia:.2f}m × {tot_rolls}롤)"
-                            + _height_note
-                        )
-                    elif candidates:
-                        best_cb = candidates[0]
-                        need_l  = best_cb["need_l"]
-                        st.warning(
-                            f"⚠️ **{best_cb['name']}** (중량 초과 가능성) | "
-                            f"총 중량 {tot_wt/1000:.2f}ton / 허용 {best_cb['wt']}ton"
-                        )
+                        # ── 단일 차량 결과 카드
+                        st.markdown(f"""
+<div style="background:rgba(34,197,94,0.08);border:1.5px solid rgba(34,197,94,0.35);
+            border-radius:12px;padding:14px 16px;margin-bottom:10px;">
+  <div style="font-size:13px;font-weight:700;color:var(--text-color);margin-bottom:8px;">
+    ✅ 추천 차량 — 1대
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <div style="flex:1;min-width:90px;text-align:center;">
+      <div style="font-size:11px;opacity:0.55;color:var(--text-color);">차량</div>
+      <div style="font-size:20px;font-weight:800;color:var(--text-color);">{best_cb['name']}</div>
+    </div>
+    <div style="flex:1;min-width:90px;text-align:center;">
+      <div style="font-size:11px;opacity:0.55;color:var(--text-color);">적재함</div>
+      <div style="font-size:14px;font-weight:700;color:var(--text-color);">{best_cb['length']}m × {best_cb['width']}m</div>
+    </div>
+    <div style="flex:1;min-width:90px;text-align:center;">
+      <div style="font-size:11px;opacity:0.55;color:var(--text-color);">총 중량</div>
+      <div style="font-size:14px;font-weight:700;color:var(--text-color);">{tot_wt/1000:.2f} ton</div>
+      <div style="font-size:11px;opacity:0.4;color:var(--text-color);">/ 허용 {best_cb['wt']} ton</div>
+    </div>
+    <div style="flex:1;min-width:90px;text-align:center;">
+      <div style="font-size:11px;opacity:0.55;color:var(--text-color);">필요 길이</div>
+      <div style="font-size:14px;font-weight:700;color:var(--text-color);">{need_l:.2f} m</div>
+      <div style="font-size:11px;opacity:0.4;color:var(--text-color);">{max_dia:.2f}m × {tot_rolls}롤</div>
+    </div>
+  </div>{('<div style="margin-top:8px;font-size:12px;color:#f59e0b;">'+_height_note.replace('  \n','')+'</div>') if _height_note else ''}
+</div>""", unsafe_allow_html=True)
+
                     else:
-                        best_cb = None
-                        need_l  = max_dia * tot_rolls
-                        st.warning("⚠️ 적합한 일반 차량이 없습니다. 직경/중량 초과 — 물류팀에 문의하세요.")
+                        # 분할 배차
+                        best_cb   = candidates[0] if candidates else None
+                        need_l    = max_dia * tot_rolls
+                        cb_groups = _cb_split_dispatch(cb_resolved, CB_VEHICLES)
+                        n_trucks  = len(cb_groups)
+
+                        # ── 분할 요약 헤더
+                        st.markdown(f"""
+<div style="background:rgba(251,146,60,0.08);border:1.5px solid rgba(251,146,60,0.35);
+            border-radius:12px;padding:12px 16px;margin-bottom:10px;">
+  <div style="font-size:13px;font-weight:700;color:var(--text-color);margin-bottom:6px;">
+    🔀 분할 배차 — 총 {n_trucks}대
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <div style="flex:1;min-width:80px;text-align:center;">
+      <div style="font-size:11px;opacity:0.55;color:var(--text-color);">총 롤</div>
+      <div style="font-size:18px;font-weight:800;color:var(--text-color);">{tot_rolls} 롤</div>
+    </div>
+    <div style="flex:1;min-width:80px;text-align:center;">
+      <div style="font-size:11px;opacity:0.55;color:var(--text-color);">총 중량</div>
+      <div style="font-size:18px;font-weight:800;color:var(--text-color);">{tot_wt/1000:.2f} ton</div>
+    </div>
+    <div style="flex:1;min-width:80px;text-align:center;">
+      <div style="font-size:11px;opacity:0.55;color:var(--text-color);">차량 수</div>
+      <div style="font-size:18px;font-weight:800;color:#f97316;">{n_trucks} 대</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+                        # ── 차량별 카드
+                        _CARD_COLORS = [
+                            "rgba(59,130,246,0.08)", "rgba(99,201,168,0.08)",
+                            "rgba(168,120,216,0.08)","rgba(244,132,95,0.08)",
+                            "rgba(232,195,76,0.08)",
+                        ]
+                        _BORDER_COLORS = [
+                            "rgba(59,130,246,0.35)", "rgba(99,201,168,0.35)",
+                            "rgba(168,120,216,0.35)","rgba(244,132,95,0.35)",
+                            "rgba(232,195,76,0.35)",
+                        ]
+                        for _gi, _g in enumerate(cb_groups):
+                            _gv   = _g["vehicle"]
+                            _gr   = _g["rolls"]
+                            _gwt  = _g["total_wt"]
+                            _gl   = _g["total_len"]
+                            _bg   = _CARD_COLORS[_gi % len(_CARD_COLORS)]
+                            _bc   = _BORDER_COLORS[_gi % len(_BORDER_COLORS)]
+                            _wt_ok = _gwt/1000 <= _gv["wt"]
+                            _wt_color = "var(--text-color)" if _wt_ok else "#ef4444"
+                            _roll_labels = ", ".join(rr["label"] for rr in _gr)
+                            st.markdown(f"""
+<div style="background:{_bg};border:1.5px solid {_bc};
+            border-radius:10px;padding:12px 14px;margin-bottom:8px;">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+    <span style="font-size:12px;font-weight:700;
+                 background:{_bc};border-radius:20px;padding:2px 10px;
+                 color:var(--text-color);">차량 {_gi+1}</span>
+    <span style="font-size:15px;font-weight:800;color:var(--text-color);">{_gv['name']}</span>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+    <div style="flex:1;min-width:80px;text-align:center;">
+      <div style="font-size:11px;opacity:0.55;color:var(--text-color);">롤 수</div>
+      <div style="font-size:16px;font-weight:700;color:var(--text-color);">{len(_gr)} 롤</div>
+    </div>
+    <div style="flex:1;min-width:80px;text-align:center;">
+      <div style="font-size:11px;opacity:0.55;color:var(--text-color);">중량</div>
+      <div style="font-size:16px;font-weight:700;color:{_wt_color};">{_gwt/1000:.2f} t</div>
+      <div style="font-size:10px;opacity:0.45;color:var(--text-color);">/ {_gv['wt']} t</div>
+    </div>
+    <div style="flex:1;min-width:80px;text-align:center;">
+      <div style="font-size:11px;opacity:0.55;color:var(--text-color);">필요 길이</div>
+      <div style="font-size:16px;font-weight:700;color:var(--text-color);">{_gl:.2f} m</div>
+      <div style="font-size:10px;opacity:0.45;color:var(--text-color);">/ {_gv['length']} m</div>
+    </div>
+    <div style="flex:1;min-width:80px;text-align:center;">
+      <div style="font-size:11px;opacity:0.55;color:var(--text-color);">적재함 폭</div>
+      <div style="font-size:16px;font-weight:700;color:var(--text-color);">{_gv['width']} m</div>
+    </div>
+  </div>
+  <div style="font-size:11px;opacity:0.55;color:var(--text-color);">적재 롤: {_roll_labels}</div>
+</div>""", unsafe_allow_html=True)
 
                     # ── 3D 버튼 ───────────────────────────────────────────
-                    if best_cb and st.button("🧊 3D 입체 보기 (컨베어벨트)", use_container_width=True, key="cb_3d_btn"):
-                        import plotly.graph_objects as _go
-                        import math as _math
-                        import numpy as _np
+                    import plotly.graph_objects as _go
+                    import numpy as _np
 
-                        _fig = _go.Figure()
-                        car_l = best_cb["length"]
-                        car_w = best_cb["width"]
-                        car_h = best_cb["height"]
+                    def _make_cb_fig(car_v, rolls_for_fig, all_resolved):
+                        """차량 + 롤 리스트로 3D Figure 생성"""
+                        _car_l = car_v["length"]
+                        _car_w = car_v["width"]
+                        _car_h = car_v["height"]
+                        _fig   = _go.Figure()
 
                         # 적재함 외곽
-                        for _tr in _make_wireframe(car_l, car_w, car_h, "#888888"):
+                        for _tr in _make_wireframe(_car_l, _car_w, _car_h, "#888888"):
                             _fig.add_trace(_tr)
-                        # 바닥
                         _fig.add_trace(_go.Mesh3d(
-                            x=[0,car_l,car_l,0], y=[0,0,car_w,car_w], z=[0,0,0,0],
+                            x=[0,_car_l,_car_l,0], y=[0,0,_car_w,_car_w], z=[0,0,0,0],
                             i=[0,0], j=[1,2], k=[2,3],
                             color="#CCCCCC", opacity=0.12, showlegend=False, hoverinfo="skip"
                         ))
-
-                        # 가이드라인: 높이 2.6m
-                        if 2.6 <= car_h + 0.5:
+                        # 높이 2.6m 가이드
+                        if 2.6 <= _car_h + 0.5:
                             _fig.add_trace(_go.Scatter3d(
-                                x=[0, car_l, car_l, 0, 0],
-                                y=[0, 0, car_w, car_w, 0],
-                                z=[2.6]*5,
-                                mode="lines",
+                                x=[0,_car_l,_car_l,0,0], y=[0,0,_car_w,_car_w,0],
+                                z=[2.6]*5, mode="lines",
                                 line=dict(color="#ef4444", width=3, dash="dash"),
                                 name="⚠️ 높이 2.6m (로베드 기준)",
                                 showlegend=True, hoverinfo="name"
                             ))
 
-                        # ── 롤 원통 렌더링 (리얼 적재 표현) ──────────────────
-                        # 좌표계:
-                        #   X축 = 적재함 길이 방향 → 롤을 직경 간격으로 나열
-                        #   Y축 = 적재함 폭 방향  → 실린더 축 (벨트 폭 = 실린더 길이)
-                        #   Z축 = 높이
-                        # 개선사항:
-                        #   1) 롤 그룹 전체를 X/Y 중앙에 배치
-                        #   2) 롤 중심을 관통하는 샤프트(봉) 렌더링 → 체인 관통 느낌
-                        #   3) 앞·뒷면 캡(원판) 추가 → 리얼한 롤 형태
-                        #   4) 샤프트 양 끝 마감 캡 추가
                         _PALETTE_CB = ["#4C9BE8","#F4845F","#63C9A8","#E8C34C","#A878D8"]
-                        _SEG  = 72   # 원 분할 수
-                        _angs = _np.linspace(0, 2 * _np.pi, _SEG + 1)
+                        _SEG  = 60
+                        _angs = _np.linspace(0, 2*_np.pi, _SEG+1)
 
-                        # ── 전체 롤 그룹의 X/Y 총 길이 계산 → 중앙 오프셋 결정
-                        _total_x = sum(r["dia_m"] for r in cb_resolved
-                                       for _ in range(r["rolls"]))
-                        _max_w_m = max(r["width_mm"] for r in cb_resolved) / 1000
-                        _x_offset = (car_l - _total_x) / 2   # X 중앙 정렬 여백
-                        _y_offset = (car_w - _max_w_m) / 2   # Y 중앙 정렬 여백
-                        _x_offset = max(_x_offset, 0.0)       # 음수 방지
-                        _y_offset = max(_y_offset, 0.0)
+                        # 이 차량에 실리는 롤 전체 X 길이 + 최대 폭
+                        _total_x = sum(rr["dia_m"] for rr in rolls_for_fig)
+                        _max_w_m = max(rr["width_mm"] for rr in rolls_for_fig) / 1000
+                        _x_off = max((_car_l - _total_x) / 2, 0.0)
+                        _y_off = max((_car_w - _max_w_m) / 2, 0.0)
 
-                        _cx = _x_offset   # 롤 배치 시작 X 위치
+                        _cx = _x_off
+                        # 코드별 색상 인덱스 매핑
+                        _code_to_ci = {}
+                        for _r0 in all_resolved:
+                            if _r0["code"] not in _code_to_ci:
+                                _code_to_ci[_r0["code"]] = len(_code_to_ci)
 
-                        for ri, r in enumerate(cb_resolved):
-                            _dia   = r["dia_m"]
-                            _r     = _dia / 2
-                            _w_m   = r["width_mm"] / 1000
-                            _color = _PALETTE_CB[ri % len(_PALETTE_CB)]
-                            _zc    = _r   # 바닥에서 반지름 높이
+                        _seen_labels = set()
+                        for rr in rolls_for_fig:
+                            _dia  = rr["dia_m"]
+                            _r    = _dia / 2
+                            _w_m  = rr["width_mm"] / 1000
+                            _ci   = _code_to_ci.get(rr["code"], 0)
+                            _col  = _PALETTE_CB[_ci % len(_PALETTE_CB)]
+                            _zc   = _r
 
-                            # Y: 롤을 차량 폭 중앙에 배치 (각 롤의 폭이 달라도 중앙 정렬)
-                            _y_front = _y_offset + ((_max_w_m - _w_m) / 2)
-                            _y_back  = _y_front + _w_m
-                            _y_cen   = (_y_front + _y_back) / 2
+                            _y_f  = _y_off + ((_max_w_m - _w_m) / 2)
+                            _y_b  = _y_f + _w_m
+                            _hx   = _col.lstrip('#')
+                            _cr, _cg, _cb_v = tuple(int(_hx[i:i+2], 16) for i in (0,2,4))
+                            _cs_side = [[0,f'rgb({_cr},{_cg},{_cb_v})'],[1,f'rgb({_cr},{_cg},{_cb_v})']]
+                            _dr,_dg,_db = max(0,_cr-40),max(0,_cg-40),max(0,_cb_v-40)
+                            _cs_cap  = [[0,f'rgb({_dr},{_dg},{_db})'],[1,f'rgb({_dr},{_dg},{_db})']]
 
-                            # hex → rgb
-                            _hx = _color.lstrip('#')
-                            _cr, _cg, _cb_v = tuple(int(_hx[i:i+2], 16) for i in (0, 2, 4))
-                            # 측면용 colorscale (약간 밝게)
-                            _cscale_side = [[0, f'rgb({_cr},{_cg},{_cb_v})'],
-                                            [1, f'rgb({_cr},{_cg},{_cb_v})']]
-                            # 캡(앞뒤 원판)용: 조금 어둡게 → 깊이감
-                            _dr = max(0, _cr - 40); _dg = max(0, _cg - 40); _db = max(0, _cb_v - 40)
-                            _cscale_cap = [[0, f'rgb({_dr},{_dg},{_db})'],
-                                           [1, f'rgb({_dr},{_dg},{_db})']]
+                            _shaft_r = max(_r * 0.08, 0.02)
+                            _xc  = _cx + _r
+                            _lbl = rr["label"]
+                            _show_leg = _lbl not in _seen_labels
+                            if _show_leg:
+                                _seen_labels.add(_lbl)
 
-                            # 샤프트(봉) 반지름: 롤 직경의 8% (체인 축처럼)
-                            _shaft_r = _r * 0.08
-                            _shaft_r = max(_shaft_r, 0.02)  # 최소 2cm
-
-                            for roll_i in range(r["rolls"]):
-                                _xc  = _cx + _r
-                                _lbl = (f"{r['code']} 롤{roll_i+1} (Ø{_dia:.2f}m)"
-                                        if roll_i == 0 else f"__hidden_cb_{ri}_{roll_i}")
-                                _is_hid = _lbl.startswith("__hidden")
-
-                                _y_grid = _np.array([_y_front, _y_back])
-
-                                # ── ① 측면 Surface (벨트 롤 외형) ─────────────
-                                _surf_x = _np.outer(_np.ones(2), _xc + _r * _np.cos(_angs))
-                                _surf_y = _np.outer(_y_grid, _np.ones(_SEG + 1))
-                                _surf_z = _np.outer(_np.ones(2), _zc + _r * _np.sin(_angs))
-
+                            # ① 측면 Surface
+                            _sx = _np.outer(_np.ones(2), _xc + _r*_np.cos(_angs))
+                            _sy = _np.outer(_np.array([_y_f,_y_b]), _np.ones(_SEG+1))
+                            _sz = _np.outer(_np.ones(2), _zc + _r*_np.sin(_angs))
+                            _fig.add_trace(_go.Surface(
+                                x=_sx,y=_sy,z=_sz, colorscale=_cs_side,
+                                showscale=False, opacity=0.88,
+                                name=_lbl if _show_leg else "",
+                                showlegend=_show_leg,
+                                hovertemplate=(
+                                    f"<b>{rr['code']}</b><br>"
+                                    f"직경: {_dia:.3f}m | 폭: {rr['width_mm']:.0f}mm<br>"
+                                    f"중량: {rr['wt_kg']:,.0f}kg<extra></extra>"
+                                ) if _show_leg else "<extra></extra>",
+                                contours=dict(x=dict(highlight=False),y=dict(highlight=False),z=dict(highlight=False))
+                            ))
+                            # ② 앞·뒷면 캡
+                            _CAP_R = 16
+                            _radii = _np.linspace(_shaft_r, _r, _CAP_R)
+                            for _y_cap in [_y_f, _y_b]:
+                                _cx2 = _np.outer(_radii, _np.cos(_angs)) + _xc
+                                _cy2 = _np.full((_CAP_R, _SEG+1), _y_cap)
+                                _cz2 = _np.outer(_radii, _np.sin(_angs)) + _zc
                                 _fig.add_trace(_go.Surface(
-                                    x=_surf_x, y=_surf_y, z=_surf_z,
-                                    colorscale=_cscale_side,
-                                    showscale=False, opacity=0.88,
-                                    name="" if _is_hid else _lbl,
-                                    showlegend=not _is_hid,
-                                    hovertemplate=(
-                                        f"<b>{r['code']}</b><br>"
-                                        f"직경: {_dia:.3f}m | 폭: {r['width_mm']:.0f}mm<br>"
-                                        f"중량: {r['wt_per_roll']:,.0f}kg<extra></extra>"
-                                        if not _is_hid else "<extra></extra>"
-                                    ),
-                                    contours=dict(
-                                        x=dict(highlight=False),
-                                        y=dict(highlight=False),
-                                        z=dict(highlight=False),
-                                    )
+                                    x=_cx2,y=_cy2,z=_cz2, colorscale=_cs_cap,
+                                    showscale=False, opacity=0.95,
+                                    showlegend=False, hoverinfo="skip",
+                                    contours=dict(x=dict(highlight=False),y=dict(highlight=False),z=dict(highlight=False))
                                 ))
-
-                                # ── ② 앞·뒷면 캡 (원판) → 리얼한 롤 단면 표현 ──
-                                # 캡: 반지름 방향으로 r_inner(샤프트) ~ r_outer(벨트) 채움
-                                _CAP_R  = 20   # 반지름 방향 분할
-                                _radii  = _np.linspace(_shaft_r, _r, _CAP_R)
-                                for _y_cap in [_y_front, _y_back]:
-                                    _cap_x = _np.outer(_radii, _np.cos(_angs)) + _xc
-                                    _cap_y = _np.full((_CAP_R, _SEG + 1), _y_cap)
-                                    _cap_z = _np.outer(_radii, _np.sin(_angs)) + _zc
-                                    _fig.add_trace(_go.Surface(
-                                        x=_cap_x, y=_cap_y, z=_cap_z,
-                                        colorscale=_cscale_cap,
-                                        showscale=False, opacity=0.95,
-                                        showlegend=False, hoverinfo="skip",
-                                        contours=dict(
-                                            x=dict(highlight=False),
-                                            y=dict(highlight=False),
-                                            z=dict(highlight=False),
-                                        )
-                                    ))
-
-                                # ── ③ 테두리 링 (앞·뒷면 외곽선) ───────────────
-                                _circ_x = list(_xc + _r * _np.cos(_angs))
-                                _circ_z = list(_zc + _r * _np.sin(_angs))
-                                for _y0 in [_y_front, _y_back]:
-                                    _fig.add_trace(_go.Scatter3d(
-                                        x=_circ_x, y=[_y0]*(_SEG+1), z=_circ_z,
-                                        mode="lines",
-                                        line=dict(color=_color, width=2),
-                                        showlegend=False, hoverinfo="skip"
-                                    ))
-
-                                # ── ④ 샤프트 (중심 관통봉) ──────────────────────
-                                # Y축 방향으로 롤 폭 + 양쪽 20cm 돌출
-                                _shaft_ext = 0.20   # 양끝 돌출 길이(m)
-                                _sy0 = _y_front - _shaft_ext
-                                _sy1 = _y_back  + _shaft_ext
-                                _s_grid = _np.array([_sy0, _sy1])
-                                _shaft_cos = _np.cos(_angs)
-                                _shaft_sin = _np.sin(_angs)
-
-                                # 샤프트 측면
-                                _sh_x = _np.outer(_np.ones(2), _xc + _shaft_r * _shaft_cos)
-                                _sh_y = _np.outer(_s_grid, _np.ones(_SEG + 1))
-                                _sh_z = _np.outer(_np.ones(2), _zc + _shaft_r * _shaft_sin)
+                            # ③ 테두리 링
+                            _cirx = list(_xc + _r*_np.cos(_angs))
+                            _cirz = list(_zc + _r*_np.sin(_angs))
+                            for _y0 in [_y_f, _y_b]:
+                                _fig.add_trace(_go.Scatter3d(
+                                    x=_cirx, y=[_y0]*(_SEG+1), z=_cirz,
+                                    mode="lines", line=dict(color=_col, width=2),
+                                    showlegend=False, hoverinfo="skip"
+                                ))
+                            # ④ 샤프트
+                            _se = 0.20
+                            _sg = _np.array([_y_f-_se, _y_b+_se])
+                            _shx = _np.outer(_np.ones(2), _xc + _shaft_r*_np.cos(_angs))
+                            _shy = _np.outer(_sg, _np.ones(_SEG+1))
+                            _shz = _np.outer(_np.ones(2), _zc + _shaft_r*_np.sin(_angs))
+                            _fig.add_trace(_go.Surface(
+                                x=_shx,y=_shy,z=_shz,
+                                colorscale=[[0,"rgb(160,160,170)"],[1,"rgb(220,220,230)"]],
+                                showscale=False, opacity=1.0,
+                                showlegend=False, hoverinfo="skip",
+                                contours=dict(x=dict(highlight=False),y=dict(highlight=False),z=dict(highlight=False))
+                            ))
+                            # 샤프트 끝 캡
+                            _sr = _np.linspace(0, _shaft_r, 4)
+                            for _syc in [_y_f-_se, _y_b+_se]:
+                                _scx = _np.outer(_sr, _np.cos(_angs)) + _xc
+                                _scy = _np.full((4,_SEG+1), _syc)
+                                _scz = _np.outer(_sr, _np.sin(_angs)) + _zc
                                 _fig.add_trace(_go.Surface(
-                                    x=_sh_x, y=_sh_y, z=_sh_z,
-                                    colorscale=[[0,"rgb(160,160,170)"],[1,"rgb(220,220,230)"]],
+                                    x=_scx,y=_scy,z=_scz,
+                                    colorscale=[[0,"rgb(140,140,150)"],[1,"rgb(200,200,210)"]],
                                     showscale=False, opacity=1.0,
                                     showlegend=False, hoverinfo="skip",
-                                    contours=dict(
-                                        x=dict(highlight=False),
-                                        y=dict(highlight=False),
-                                        z=dict(highlight=False),
-                                    )
+                                    contours=dict(x=dict(highlight=False),y=dict(highlight=False),z=dict(highlight=False))
                                 ))
-                                # 샤프트 끝 캡
-                                _sh_cap_r = _np.linspace(0, _shaft_r, 5)
-                                for _sy_cap in [_sy0, _sy1]:
-                                    _sc_x = _np.outer(_sh_cap_r, _np.cos(_angs)) + _xc
-                                    _sc_y = _np.full((5, _SEG + 1), _sy_cap)
-                                    _sc_z = _np.outer(_sh_cap_r, _np.sin(_angs)) + _zc
-                                    _fig.add_trace(_go.Surface(
-                                        x=_sc_x, y=_sc_y, z=_sc_z,
-                                        colorscale=[[0,"rgb(140,140,150)"],[1,"rgb(200,200,210)"]],
-                                        showscale=False, opacity=1.0,
-                                        showlegend=False, hoverinfo="skip",
-                                        contours=dict(
-                                            x=dict(highlight=False),
-                                            y=dict(highlight=False),
-                                            z=dict(highlight=False),
-                                        )
-                                    ))
-
-                                _cx += _dia   # 다음 롤: X방향으로 직경 간격
+                            _cx += _dia
 
                         _fig.update_layout(
                             scene=dict(
-                                xaxis=dict(range=[0, car_l], title="길이 (m)"),
-                                yaxis=dict(range=[0, car_w], title="폭 (m)"),
-                                zaxis=dict(range=[0, max(car_h, max_dia+0.2)], title="높이 (m)"),
+                                xaxis=dict(range=[0,_car_l], title="길이 (m)"),
+                                yaxis=dict(range=[0,_car_w], title="폭 (m)"),
+                                zaxis=dict(range=[0,max(_car_h, max(rr["dia_m"] for rr in rolls_for_fig)+0.2)], title="높이 (m)"),
                                 aspectmode="manual",
-                                aspectratio=dict(x=max(car_l,0.1)/max(car_w,0.1), y=1,
-                                                 z=max(car_h,0.1)/max(car_w,0.1)),
+                                aspectratio=dict(
+                                    x=max(_car_l,0.1)/max(_car_w,0.1),
+                                    y=1,
+                                    z=max(_car_h,0.1)/max(_car_w,0.1)
+                                ),
                                 camera=dict(eye=dict(x=1.5, y=-2.0, z=1.3))
                             ),
                             margin=dict(l=0,r=0,b=0,t=30),
                             legend=dict(font=dict(size=11), x=0, y=1)
                         )
+                        return _fig
 
-                        # 안내 카드
-                        _guide_h = (
-                            '<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">'
-                            f'<div style="flex:1;min-width:110px;background:rgba(59,130,246,0.08);border-radius:8px;padding:7px 12px;border:1.5px solid rgba(59,130,246,0.2);">'
-                            f'<div style="font-size:11px;opacity:0.6;color:var(--text-color);">추천 차량</div>'
-                            f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{best_cb["name"]}</div>'
-                            f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">{best_cb["length"]}m × {best_cb["width"]}m</div></div>'
-                            f'<div style="flex:1;min-width:110px;background:rgba(128,128,128,0.06);border-radius:8px;padding:7px 12px;border:1.5px solid rgba(128,128,128,0.15);">'
-                            f'<div style="font-size:11px;opacity:0.6;color:var(--text-color);">최대 직경</div>'
-                            f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{max_dia:.3f} m</div>'
-                            f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">{int(max_dia*1000)} mm</div></div>'
-                            f'<div style="flex:1;min-width:110px;background:rgba(128,128,128,0.06);border-radius:8px;padding:7px 12px;border:1.5px solid rgba(128,128,128,0.15);">'
-                            f'<div style="font-size:11px;opacity:0.6;color:var(--text-color);">총 롤 수 / 중량</div>'
-                            f'<div style="font-size:14px;font-weight:700;color:var(--text-color);">{tot_rolls} 롤</div>'
-                            f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">{tot_wt:,.0f} kg ({tot_wt/1000:.2f} ton)</div></div>'
-                            '</div>'
-                        )
-                        st.session_state["cb_3d_data"] = {
-                            "fig": _fig,
-                            "guide_html": _guide_h,
-                        }
-                        show_cb_3d_popup()
+                    # ── 3D 버튼 표시 ──────────────────────────────────────
+                    if cb_groups is None and best_cb:
+                        # 단일 차량 3D
+                        if st.button("🧊 3D 입체 보기 (컨베어벨트)", use_container_width=True, key="cb_3d_btn"):
+                            all_rolls_single = []
+                            for r in cb_resolved:
+                                for ri in range(r["rolls"]):
+                                    all_rolls_single.append({
+                                        "code": r["code"],
+                                        "dia_m": r["dia_m"],
+                                        "width_mm": r["width_mm"],
+                                        "wt_kg": r["wt_per_roll"],
+                                        "wt_per_roll": r["wt_per_roll"],
+                                        "label": f"{r['code']} 롤{ri+1}",
+                                    })
+                            _fig = _make_cb_fig(best_cb, all_rolls_single, cb_resolved)
+                            _guide_h = (
+                                '<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">'
+                                f'<div style="flex:1;min-width:100px;background:rgba(59,130,246,0.08);border-radius:8px;padding:7px 12px;border:1.5px solid rgba(59,130,246,0.2);">'
+                                f'<div style="font-size:11px;opacity:0.6;color:var(--text-color);">추천 차량</div>'
+                                f'<div style="font-size:15px;font-weight:700;color:var(--text-color);">{best_cb["name"]}</div>'
+                                f'<div style="font-size:11px;opacity:0.5;color:var(--text-color);">{best_cb["length"]}m × {best_cb["width"]}m</div></div>'
+                                f'<div style="flex:1;min-width:100px;background:rgba(128,128,128,0.06);border-radius:8px;padding:7px 12px;border:1.5px solid rgba(128,128,128,0.15);">'
+                                f'<div style="font-size:11px;opacity:0.6;color:var(--text-color);">총 롤 / 중량</div>'
+                                f'<div style="font-size:15px;font-weight:700;color:var(--text-color);">{tot_rolls}롤 / {tot_wt/1000:.2f}ton</div></div>'
+                                '</div>'
+                            )
+                            st.session_state["cb_3d_data"] = {"split": False, "fig": _fig, "guide_html": _guide_h}
+                            show_cb_3d_popup()
+
+                    elif cb_groups:
+                        # 분할 배차 3D — 팝업 안에서 탭 (크롤러와 동일한 팝업 방식)
+                        if st.button("🧊 3D 입체 보기 (분할 배차)", use_container_width=True, key="cb_3d_split_btn"):
+                            n_g = len(cb_groups)
+                            _guide_h = (
+                                '<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">'
+                                f'<div style="flex:1;min-width:100px;background:rgba(251,146,60,0.08);border-radius:8px;padding:7px 12px;border:1.5px solid rgba(251,146,60,0.35);">'
+                                f'<div style="font-size:11px;opacity:0.6;color:var(--text-color);">분할 배차</div>'
+                                f'<div style="font-size:15px;font-weight:700;color:#f97316;">{n_g} 대</div></div>'
+                                f'<div style="flex:1;min-width:100px;background:rgba(128,128,128,0.06);border-radius:8px;padding:7px 12px;border:1.5px solid rgba(128,128,128,0.15);">'
+                                f'<div style="font-size:11px;opacity:0.6;color:var(--text-color);">총 롤 / 중량</div>'
+                                f'<div style="font-size:15px;font-weight:700;color:var(--text-color);">{tot_rolls}롤 / {tot_wt/1000:.2f}ton</div></div>'
+                                '</div>'
+                            )
+                            st.session_state["cb_3d_data"] = {
+                                "split": True,
+                                "groups": cb_groups,
+                                "all_resolved": cb_resolved,
+                                "make_fig_fn": _make_cb_fig,
+                                "guide_html": _guide_h,
+                            }
+                            show_cb_3d_popup()
 
     elif current_team == "트랙영업팀":
         st.markdown(

@@ -2898,7 +2898,58 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
                             f"| 🏭 소속 | {d['base']} |"
                         )
                     else:
-                        # 특정 기사 미지정 → scope 기반 필터링
+                        # ── 거래처 문의 → 납품 기사 소속별 담당자 안내 ──
+                        _CUSTOMER_DRIVER = {
+                            # 부산공장 기사 (김영철/김병일) 납품 거래처
+                            "GM대우 KD":"김영철","동양 ENG":"김영철","동일벨트":"김영철",
+                            "동일종합산업":"김영철","동일종합상사":"김영철","동일팬유통":"김영철",
+                            "동일상사":"김영철","모던테크":"김영철","승리상사":"김영철",
+                            "한국벨트":"김영철","현대내자":"김영철","현대테크젠":"김영철",
+                            "동양알앤비":"김병일","대신화물":"김병일","동일삼광산업":"김병일",
+                            "동일상공사":"김병일","동일알앤씨":"김병일","동일종합물산":"김병일",
+                            "반도상사":"김병일","성우상사":"김병일","유일상사":"김병일",
+                            # 중부물류센터 기사 (이용구/심효섭) 납품 거래처
+                            "동일벨트산업":"이용구","동일부품":"이용구","동일팬벨트":"이용구",
+                            "명진":"이용구","서울팬벨트":"이용구","서울팬벨트(하남)":"이용구",
+                            "인왕산업":"이용구","한길산업":"이용구","흥진사":"이용구",
+                            "삼흥정밀":"심효섭","성보산업사":"심효섭","신우기업":"심효섭",
+                            "신흥알앤테크":"심효섭","신흥폴리테크":"심효섭","유니온벨티노":"심효섭",
+                            "제일산업사":"심효섭","조선통상":"심효섭","조일상공":"심효섭",
+                            "태영산업사":"심효섭","흥국상사":"심효섭",
+                        }
+                        # 공백 제거 후 거래처 매칭 (긴 이름 우선 → "동일벨트산업"이 "동일벨트"보다 먼저)
+                        _q_ns = query.replace(" ","")
+                        _matched_customer = next(
+                            (c for c in sorted(_CUSTOMER_DRIVER, key=len, reverse=True)
+                             if c.replace(" ","") in _q_ns), None
+                        )
+                        if _matched_customer:
+                            _driver = _CUSTOMER_DRIVER[_matched_customer]
+                            _d_info = DRIVER_INFO_MAP.get(_driver, {})
+                            if _driver in ["김영철","김병일"]:
+                                _contact = (
+                                    f"**{_matched_customer}** 납품은 **{_driver} 기사** ({_d_info.get('area','')})가 담당합니다.\n\n"
+                                    f"제품 관련 문의는 아래 담당자에게 연락해 주세요.\n"
+                                    f"- 김동우 팀원 (내선: 9133) — 전동내수 담당\n"
+                                    f"- 이정희 주임 (내선: 9341) — 전동내수 공정 직책자"
+                                )
+                            else:
+                                _contact = (
+                                    f"**{_matched_customer}** 납품은 **{_driver} 기사** ({_d_info.get('area','')})가 담당합니다.\n\n"
+                                    f"제품 관련 문의는 아래 담당자에게 연락해 주세요.\n"
+                                    f"- 이정환 팀원 (내선: 9834) — 중부물류센터 담당\n"
+                                    f"- 오승현 팀원 (내선: 9832) — 중부물류센터 담당"
+                                )
+                            answer = _contact
+                            logging_system.log_answer(
+                                query=query, answer=answer, sources=[],
+                                metadata={"customer_lookup": True},
+                                team=team, response_ms=int((time.time()-_start_ts)*1000),
+                                domain="driver_route", session_turn=_session_turn, hour=_hour,
+                            )
+                            return answer, [], False
+
+                        # 거래처 매칭 없음 → scope 기반 필터링
                         _scope_busan = any(k in query for k in ["부산","부산공장","부산 기사"])
                         _scope_seoul = any(k in query for k in ["서울","중부","중부물류","수도권"])
 
