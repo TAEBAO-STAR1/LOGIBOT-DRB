@@ -178,9 +178,11 @@ def check_simulator_intent(query: str) -> str | None:
         "박스 규격", "박스 크기", "박스 사이즈", "박스 무게",
         "박스 적재", "박스에 적재", "적재 수", "적재수",
         "몇개씩 적재", "몇 개씩 적재", "몇 개 들어가", "몇개 들어가",
+        # 컨테이너 관련 질문 → 시뮬레이터에 없음, RAG로 처리
+        "컨테이너", "container", "20ft", "40ft", "FCL", "LCL",
     ]
     if any(k in q for k in _lookup_kw):
-        return None  # 단순 조회 → RAG 답변으로 처리
+        return None  # 단순 조회 또는 컨테이너 질문 → RAG 답변으로 처리
 
     # ── 1) 자재코드 + 배차/차량 맥락 → 시뮬레이터 자동 유도 (최우선) ──
     # 키워드보다 먼저 체크: 자재코드가 있으면 제품 유형으로 정확하게 유도
@@ -188,10 +190,10 @@ def check_simulator_intent(query: str) -> str | None:
     _code_pat = _re.search(r"(?<!\d)(\d{7})(?!\d)", q)
     if _code_pat:
         _code = int(_code_pat.group(1))
-        # 배차/차량 맥락 키워드
+        # 배차/차량 맥락 키워드 — "보내"는 수출/택배 등 다양한 맥락이라 제외
         _dispatch_kw = [
-            "배차", "차량", "몇 톤", "몇톤", "출고", "운송",
-            "적재", "싣", "몇 대", "배달", "보내",
+            "배차", "차량", "몇 톤", "몇톤", "운송",
+            "적재", "싣", "몇 대", "배달",
         ]
         _is_dispatch = any(k in q for k in _dispatch_kw)
 
@@ -311,11 +313,7 @@ _DOMAIN_RULES = {
    ② 총중량이 차량 1대 최대중량 이하 → 해당 차량 1대 추천
    ③ 초과 시 분할 배차 계산: 몇 대 필요한지 올림 계산
    ④ 결과 표: | 총중량 | 추천차량 | 필요대수 | 비고 |
-   ⑤ 로브이(Low-bed)는 높이 2.6m 이상 제품에만 적용
-6. 분단·포장·신청 등 업무절차 질문 ([참고 데이터]에 운영규칙 Q&A가 포함된 경우):
-   ① 컨베어/크롤러 관련 Q&A를 우선 찾아 답변
-   ② "분단 가능 여부" → 오후 3시 이후 불가 안내 + 컨베어 담당자 직접 확인 권고
-   ③ 절차 관련 내용이 없으면 "컨베어 담당자(신태환 팀원, 내선 9067)에게 문의" 안내""",
+   ⑤ 로브이(Low-bed)는 높이 2.6m 이상 제품에만 적용""",
 
     "crawler": """
 [크롤러 러버트랙 전용 규칙]
@@ -336,24 +334,41 @@ _DOMAIN_RULES = {
 5. 결과 표: | 수량(M) | 우든박스 규격(W×L×H) | 우든박스 중량 추정 | 총중량 예상 |""",
 
     "export": """
-[수출 포장량 전용 규칙]
+[수출 포장량 및 컨테이너 전용 규칙]
 1. 박스 종류별 1파렛트당 적재수량:
    600박스=8개/PLT, 650박스=20개/PLT, 1090박스=4개/PLT
-2. 파렛트 규격:
-   600박스: 1200×800×730mm (패키징: 1200×800×1460mm)
-   650박스: 1100×1100×2200mm
-   1090박스: 1100×1100×1110mm (패키징: 1100×1100×2220mm)
-3. CBM 계산: 파렛트 1개 = 2.662 CBM
-4. 컨테이너 선택: 20ft=최대10PLT, 40ft=최대20PLT, 혼합 조합도 제시""",
+
+2. 파렛트 규격 (파렛트 단위 / 패키징 단위 모두 함께 제시):
+   600박스: 파렛트 1200×800×730mm / 패키징 1200×800×1460mm
+   650박스: 1100×1100×2200mm (패키징 동일)
+   1090박스: 파렛트 1100×1100×1110mm / 패키징 1100×1100×2220mm
+   ※ 600박스·1090박스는 파렛트/패키징 두 단위 모두 답변에 포함
+
+3. CBM 계산: 수출 파렛트 1개 = 1.1m × 1.1m × 2.2m = 2.662 CBM
+
+4. 컨테이너 도어(개구부) 기준 제원 — 반드시 이 수치 사용:
+   20ft Standard : 폭 2,340mm × 높이 2,280mm / 최대 약 17.5~18톤 (초과 시 할증료 발생)
+   40ft Standard : 폭 2,340mm × 높이 2,280mm / 최대 약 20~22톤 (초과 시 운송 까다로움·불가)
+   40ft HC       : 폭 2,340mm × 높이 2,585mm (하이큐브, 높이 여유 있음)
+   ※ PLT 최대 적재 수는 데이터에 명시되지 않음 → 파렛트 크기·CBM·컨테이너 폭 기준으로 계산해서 제시
+
+5. 컨테이너 선택 로직:
+   ① 총 PLT 수 × 2.662 CBM = 총 CBM 계산
+   ② 파렛트 폭(1.1m)이 컨테이너 도어 폭(2.34m) 이내인지 확인
+   ③ 총 중량이 컨테이너 허용 중량 이내인지 확인
+   ④ 조건 충족하는 가장 경제적인 컨테이너(20ft 우선) 추천, 부족 시 40ft 또는 혼합 조합 제시
+
+6. [참고 데이터]에 관련 내용이 없으면 "해당 정보를 내부 데이터에서 찾을 수 없습니다" 안내""",
 
     "domestic": """
-[국내 운송방식 전용 규칙]
-1. 자재코드로 1PC당 중량 확인 → 총 중량 계산
-2. 도착지 구간별 기준:
-   부산시내: 150kg 이하 화물/택배, 초과 직송
-   경남권(녹산·대저·명지): 300kg 이하 화물/택배, 초과 직송
-   장거리(서울·광주·대구 등): 800kg 이하 화물/택배, 초과 직송
-3. 웹 검색 절대 금지""",
+[국내 운송방식 판단 규칙 — 아래는 내부 판단 기준이며 답변 형식이 아님]
+- 판단 순서: ① 자재코드로 1PC당 중량 확인 → ② 주문수량×1PC중량으로 총중량 계산 → ③ 도착지 구간·기준중량과 비교 → ④ 결론 제시
+- 도착지 구간별 기준:
+    부산시내: 총중량 150kg 이하 → 화물·택배, 초과 → 직송
+    경남권(녹산·대저·명지): 총중량 300kg 이하 → 화물·택배, 초과 → 직송
+    장거리(서울·광주·대구 등): 총중량 800kg 이하 → 화물·택배, 초과 → 직송
+- 답변은 단계를 자연스러운 설명 또는 표로 정리하되, 번호는 1→2→3→4 순서로 이어서 매길 것
+- 웹 검색 절대 금지""",
 
     "driver_route": """
 [지입기사 납품 동선 전용 규칙]
@@ -407,17 +422,6 @@ _DOMAIN_RULES = {
 4. 수량 질문: 데이터를 빠짐없이 세어 정확한 합계 제시
 5. 자재코드(7자리 숫자) 단독 입력: 자재 종류 자동 식별 후 기본정보 제시
 6. [참고 데이터]에 관련 내용이 없으면 "해당 정보를 내부 데이터에서 찾을 수 없습니다" 안내""",
-
-    "route": """
-[용차 차량 노선 권역 기준 전용 규칙]
-1. 장거리/단거리 기준 우선 제시:
-   - 단거리: 영남권(경남권 / 경북권 / 부산권)
-   - 장거리: 영남권 이외의 모든 권역 (강원권, 경기권, 서울권, 인천권, 전남권, 전북권, 충남권, 충북권 등)
-   - 비고(F2셀) 내용을 반드시 인용: "권역 영남권(경남권/경북권/부산권)은 단거리 이외에 권역은 장거리 노선"
-2. 권역별 구체 지역 목록도 함께 제시 (데이터에서 단거리/장거리 컬럼 기준으로 분류)
-3. 단거리·장거리를 묻는 질문이면 양쪽 모두 표로 정리해서 제시
-4. 예상 소요시간이 있는 노선은 함께 안내
-5. [참고 데이터]에 관련 내용이 없으면 "해당 정보를 내부 데이터에서 찾을 수 없습니다" 안내""",
 }
 
 _PROMPT_BASE = """{system_role}
@@ -1011,14 +1015,6 @@ class RAGChainWrapper:
                                          "지입기사", "지입 기사", "납품경로"]):
             return "driver_route"
 
-        # 2-1-b. 용차 노선 권역 기준 질문 → route
-        # "장거리/단거리 노선 기준", "장거리 권역 어디", "용차 노선 기준" 등
-        _route_zone_kw = ["장거리 노선", "단거리 노선", "장거리 권역", "단거리 권역",
-                          "장거리 기준", "단거리 기준", "노선 기준", "용차 노선",
-                          "장거리 어디", "단거리 어디", "권역 기준", "노선 권역"]
-        if any(k in combined for k in _route_zone_kw):
-            return "route"
-
         # 2-2. 수출 포장 — B01/B02 같은 사내 전용 코드는 LLM이 모름
         if any(k in combined for k in ["B01", "B02", "N18", "N19", "CBM", "cbm",
                                          "수출 파렛트", "컨테이너", "수출 포장량"]):
@@ -1026,13 +1022,9 @@ class RAGChainWrapper:
 
         # 2-3. 파렛트/박스 규격 조회 (배차/운송 맥락 없을 때만)
         _is_dispatch = any(k in query for k in ["배차", "차량", "운송", "몇 톤", "몇톤"])
-        _has_plt_kw = any(k in combined for k in ["PLT", "plt", "파렛트", "박스 규격", "PE포", "받침목",
-                                                    "포장자재", "포장재", "포장 종류", "포장 자재"])
-        if _has_plt_kw:
-            if _is_dispatch:
-                # PLT + 배차/차량 → 몇 톤 차량이 필요한지 묻는 업무 규칙 질문
-                return "operation_rule"
-            else:
+        if any(k in combined for k in ["PLT", "plt", "파렛트", "박스 규격", "PE포", "받침목",
+                                         "포장자재", "포장재", "포장 종류", "포장 자재"]):
+            if not _is_dispatch:
                 return "pallet_box"
 
         # 2-4. 차량 제원 명시 질문
@@ -1055,10 +1047,8 @@ operation_rule : 물류 업무 절차·규칙·방법 질문 전반. 아래를 �
                  샘플 발송·수령, 창고·보관, 짐 이동, 업무 문의 등
                  ※ "직배차량","직배차","고정 용차","직배"처럼 표현이 달라도
                    배차·마감·출고 맥락이면 operation_rule
-route          : 용차 차량 노선 권역 기준 (장거리/단거리 구분, 어느 지역이 장거리인지,
-                 권역별 분류 기준, 노선 거리 기준)
 domestic       : 국내 운송수단 선택·비교 (화물vs택배vs직송, 운임비교, 어떻게 보낼지)
-general        : 위 4가지 외
+general        : 위 3가지 외
 
 예시) "이정희 주임 연락처" → personnel
 예시) "지게차 어떻게 신청해" → operation_rule
@@ -1078,9 +1068,6 @@ general        : 위 4가지 외
 예시) "파렛트 운송 차량 톤수 알려줘" → operation_rule
 예시) "제주도에 배송하려고 하는데 어떻게 해야해" → operation_rule
 예시) "제주도 배송 되나요" → operation_rule
-예시) "장거리 노선에 대한 기준을 알려줘" → route
-예시) "단거리 권역이 어디야" → route
-예시) "장거리 노선은 어느 지역이야" → route
 예시) "동양알앤비 납품 담당자 누구야" → driver_route
 예시) "유일상사에 납품하려는데 문의처" → driver_route
 
@@ -1100,8 +1087,6 @@ general        : 위 4가지 외
                 domain = "personnel"
             elif "operation" in raw_intent:
                 domain = "operation_rule"
-            elif "route" in raw_intent:
-                domain = "route"
             elif "domestic" in raw_intent:
                 domain = "domestic"
             else:
@@ -1304,8 +1289,21 @@ general        : 위 4가지 외
                                 supplement_sheets = [s] + supplement_sheets
                     logger.info(f"domestic 보완 시트 (자재+운송): {supplement_sheets}")
 
+                # ★ 컨테이너/수출 질문: 자재코드 도메인과 무관하게 수출 데이터 보완
+                #   (6008996같이 conveyor로 캐싱된 자재도 수출 질문이면 export 시트 필요)
+                _container_kw = ["컨테이너", "container", "20ft", "40ft", "FCL", "LCL", "수출"]
+                _is_container_query = any(k in query for k in _container_kw)
+                if _is_container_query:
+                    _export_sheets = self.DOMAIN_SUPPLEMENT_SHEETS.get("export", [])
+                    for s in _export_sheets:
+                        if s not in supplement_sheets:
+                            supplement_sheets = [s] + supplement_sheets  # 앞에 추가 (우선 참조)
+                    logger.info(f"컨테이너/수출 질문 → export 시트 보완: {supplement_sheets}")
+
                 if supplement_sheets:
-                    whole_docs = self.fetch_whole_docs(supplement_sheets, limit=2)
+                    # 컨테이너 질문은 수출 데이터가 많으므로 limit 증가
+                    _fetch_limit = 10 if _is_container_query else 2
+                    whole_docs = self.fetch_whole_docs(supplement_sheets, limit=_fetch_limit)
                     results.extend(whole_docs)
                     logger.info(f"코드 검색: {len(keyword_results)}개 | 도메인: {domain} | 보완: {supplement_sheets} ({len(whole_docs)}개)")
                 else:
@@ -1345,7 +1343,6 @@ general        : 위 4가지 외
                 "vehicle"        : 0.12,
                 "pallet_box"     : 0.12,
                 "driver_route"   : 0.12,
-                "route"          : 0.12,  # 용차 차량 노선 권역 기준
                 "general"        : 0.12,
             }
             _threshold = SCORE_THRESHOLD.get(_domain_now, 0.35)
@@ -1416,22 +1413,6 @@ general        : 위 4가지 외
                             added += 1
                     logger.info(f"general/operation_rule 운영규칙 보완: +{added}개")
 
-                    # PLT + 배차/차량 맥락 질문 → 차량 데이터 시트도 함께 보완
-                    # (운영규칙에는 "PLT 크기·중량에 따라 달라진다"고만 있고,
-                    #  실제 톤수별 규격은 차량 데이터 시트에 있으므로 같이 제공해야 LLM이 답변 가능)
-                    _plt_dispatch_kw_q = ["PLT", "plt", "파렛트"]
-                    _dispatch_kw_q     = ["배차", "차량", "몇 톤", "몇톤", "운송"]
-                    if (any(k in query for k in _plt_dispatch_kw_q)
-                            and any(k in query for k in _dispatch_kw_q)):
-                        veh_supp = self.fetch_whole_docs(["차량 데이터"], limit=20)
-                        veh_added = 0
-                        for doc, score in veh_supp:
-                            if doc.page_content[:50] not in existing:
-                                filtered_results.append((doc, score))
-                                existing.add(doc.page_content[:50])
-                                veh_added += 1
-                        logger.info(f"PLT+배차 질문 → 차량 데이터 보완: +{veh_added}개")
-
                     # 샘플 관련 질문이면 샘플 문서를 컨텍스트 앞으로 강제 이동
                     _sample_kw = ["샘플", "sample", "Sample"]
                     if any(k in query for k in _sample_kw):
@@ -1446,6 +1427,24 @@ general        : 위 4가지 외
                         filtered_results = _sample_docs + _other_docs
                         if _sample_docs:
                             logger.info(f"샘플 문서 {len(_sample_docs)}개 컨텍스트 앞에 배치")
+
+            # export 도메인 → 운영규칙에서 수출/컨테이너 Q&A 강제 보완
+            # (컨테이너 제원·PLT·CBM 관련 Q&A가 운영규칙 시트에 있음)
+            if domain == "export" or any(k in query for k in ["컨테이너", "container", "20ft", "40ft", "FCL", "LCL"]):
+                exp_op_docs = self.fetch_whole_docs(["물류팀 운영 규칙", "수출 포장량 산출 수식", "포장량 산출 데이터"], limit=50)
+                if exp_op_docs:
+                    existing = {doc.page_content[:50] for doc, _ in filtered_results}
+                    # 컨테이너·수출 관련 Q&A 우선 배치
+                    _export_kw = ["컨테이너", "수출", "CBM", "cbm", "파렛트", "PLT", "박스", "20ft", "40ft"]
+                    exp_first = [(d, s) for d, s in exp_op_docs if any(k in d.page_content for k in _export_kw)]
+                    exp_rest  = [(d, s) for d, s in exp_op_docs if (d, s) not in exp_first]
+                    added = 0
+                    for doc, score in exp_first + exp_rest:
+                        if doc.page_content[:50] not in existing:
+                            filtered_results.insert(0, (doc, score))
+                            existing.add(doc.page_content[:50])
+                            added += 1
+                    logger.info(f"export/컨테이너 질문 → 운영규칙+수출수식 보완: +{added}개")
 
             # pallet_box 도메인 → 파렛트/박스 데이터 전체 강제 보완
             if domain == "pallet_box":
@@ -1503,45 +1502,6 @@ general        : 위 4가지 외
                     logger.info(f"personnel 강제 보완: +{added}개, 타도메인 문서 제거 후 {len(filtered_results)}개")
 
             # 지입기사 납품 동선: 전체 20개 문서가 필요 (A+B+공통)
-            # route 도메인 → 용차 차량 노선 데이터 전체 보완
-            # (장거리/단거리 권역 기준, F2 비고 포함)
-            if domain == "route":
-                route_docs = self.fetch_whole_docs(["용차 차량 노선 데이터"], limit=200)
-                if route_docs:
-                    existing = {doc.page_content[:50] for doc, _ in filtered_results}
-                    added = 0
-                    for doc, score in route_docs:
-                        if doc.page_content[:50] not in existing:
-                            filtered_results.append((doc, score))
-                            existing.add(doc.page_content[:50])
-                            added += 1
-                    logger.info(f"route 도메인 용차노선 보완: +{added}개")
-
-            # conveyor 도메인 → 업무절차 질문 시 운영규칙 함께 보완
-            # (분단 가능 여부, 포장 방법 등 절차성 질문은 운영규칙 시트에 존재)
-            if domain == "conveyor":
-                _conv_op_kw = ["분단", "가능", "신청", "포장", "방법", "절차", "담당", "어떻게"]
-                if any(k in query for k in _conv_op_kw):
-                    conv_op_docs = self.fetch_whole_docs(["물류팀 운영 규칙"], limit=100)
-                    if conv_op_docs:
-                        existing = {doc.page_content[:50] for doc, _ in filtered_results}
-                        # 컨베어/크롤러 관련 Q&A만 우선 추가, 나머지도 보완
-                        conv_first = [
-                            (d, s) for d, s in conv_op_docs
-                            if any(k in d.page_content for k in ["컨베어", "컨베이어", "분단", "크롤러"])
-                        ]
-                        others = [
-                            (d, s) for d, s in conv_op_docs
-                            if (d, s) not in conv_first
-                        ]
-                        added = 0
-                        for doc, score in conv_first + others:
-                            if doc.page_content[:50] not in existing:
-                                filtered_results.insert(0, (doc, score))  # 앞에 배치 (우선 참조)
-                                existing.add(doc.page_content[:50])
-                                added += 1
-                        logger.info(f"conveyor 업무절차 질문 → 운영규칙 보완: +{added}개")
-
             if domain == "driver_route":
                 driver_docs = self.fetch_driver_docs_by_group()
                 # 20개 미만이면 일부 route_group 누락 → 엑셀 직접 로드
@@ -2927,90 +2887,20 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
                 for doc, _ in filtered_docs
             ])
 
-            _all_sources = sorted([{
-                'name': (
-                    doc.metadata.get('file_name')
-                    or os.path.basename(doc.metadata.get('source', ''))
-                    or doc.metadata.get('sheet_name', '검색 결과')
-                ),
-                'page_content': doc.page_content,
-                'sheet_name': doc.metadata.get('sheet_name', ''),
-                'internal_score': float(score),
-                'page': doc.metadata.get('page', 'N/A'),
-                '_meta': doc.metadata,
-            } for doc, score in filtered_docs],
-                key=lambda x: x['internal_score'], reverse=True
-            )
-
-            # ── 답변 텍스트와 실제로 겹치는 문서를 sources 앞에 배치 ──────────
-            # 문제: fetch_whole_docs 보완 문서는 score=0으로 뒤에 밀려
-            #       답변에 쓰인 문서가 참고탭 앞에 안 나오는 현상 발생
-            # 해결: 답변 텍스트에서 의미 있는 키워드 추출 →
-            #       해당 키워드가 page_content에 포함된 문서를 앞으로 이동
-            def _rerank_by_answer(sources_list, answer_text, top_n=10):
-                if not answer_text:
-                    return sources_list
-
-                # 답변에서 2글자 이상 명사성 키워드 추출 (조사/어미 제외)
-                _stopwords = {
-                    '있습니다', '합니다', '됩니다', '하여야', '해야', '하면',
-                    '경우에', '경우는', '경우', '다음과', '같이', '그리고',
-                    '또는', '이상', '이하', '위하여', '위해', '때문에',
-                    '통해', '따라', '관련', '기준', '방법', '내용',
-                    '정보', '확인', '처리', '진행', '가능', '불가',
-                    '필요', '요청', '안내', '담당', '문의', '연락',
-                }
-                _ans_tokens = set(
-                    t for t in answer_text.replace('\n', ' ').split()
-                    if len(t) >= 2 and t not in _stopwords
-                )
-
-                # 겹치는 토큰 수 기준으로 각 문서 점수 계산
-                def _overlap_score(s):
-                    _content_tokens = set(s['page_content'].replace('\n', ' ').split())
-                    return len(_ans_tokens & _content_tokens)
-
-                # 겹침 있는 문서(앞) + 없는 문서(뒤) 분리 후 합산
-                _matched   = sorted(
-                    [s for s in sources_list if _overlap_score(s) > 0],
-                    key=_overlap_score, reverse=True
-                )
-                _unmatched = [s for s in sources_list if _overlap_score(s) == 0]
-                return (_matched + _unmatched)[:top_n]
-
-            # 도메인별 sources 상한 및 필터링 전략
-            _src_domain = rag_chain._detect_domain(query)
-            if _src_domain == 'personnel':
-                # 답변에 언급된 이름과 매칭되는 문서만 표시
-                # (summary 청크 제외, 개인별 청크만)
-                _name_sources = [
-                    s for s in _all_sources
-                    if s['_meta'].get('type') != 'summary'
-                    and s['_meta'].get('domain') == 'personnel'
-                    and s['_meta'].get('name', '') in answer
-                ]
-                # 언급된 이름 매칭 없으면 summary 제외 후 답변 겹침 기준 재정렬
-                _base = _name_sources if _name_sources else [
-                    s for s in _all_sources
-                    if s['_meta'].get('type') != 'summary'
-                ]
-                sources = _rerank_by_answer(_base, answer, top_n=10)
-            elif _src_domain in ('operation_rule', 'driver_route', 'route'):
-                sources = _rerank_by_answer(_all_sources, answer, top_n=10)
-            else:
-                sources = _rerank_by_answer(_all_sources, answer, top_n=5)
-
-            # _meta 내부 키 제거 (팝업에서 불필요)
-            for s in sources:
-                s.pop('_meta', None)
 
             _domain_for_limit = rag_chain._detect_domain(query)
+            # 컨테이너/수출 질문은 자재코드 도메인과 무관하게 export 프롬프트 적용
+            _container_kw_p = ["컨테이너", "container", "20ft", "40ft", "FCL", "LCL"]
+            if any(k in query for k in _container_kw_p):
+                _domain_for_limit = "export"
             if _domain_for_limit in ("driver_route", "operation_rule"):
                 _ctx_limit = 14000  # summary(~7000자) + 개별 Q&A 청크 여유분
             elif _domain_for_limit in ("general", "personnel"):
                 _ctx_limit = 8000  # Fix: 지게차 기사 등 운영규칙+현황 동시 참조 필요
             elif _domain_for_limit == "route":
                 _ctx_limit = 12000  # 용차 노선 전체 권역 데이터 커버
+            elif _domain_for_limit in ("export", "conveyor"):
+                _ctx_limit = 8000  # 수출포장/컨테이너: 규격+수식 데이터 동시 참조
             else:
                 _ctx_limit = 4000
             if len(context_text) > _ctx_limit:
@@ -3029,6 +2919,9 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
 
 선택지:
 - ROUTE_LOOKUP : 특정 기사의 납품 동선/노선/일정을 조회하는 질문
+- ROUTE_LOOKUP : 특정 기사의 납품 동선/노선/일정을 조회하는 질문
+- OPERATION_RULE : 기사 운행의 특이사항·규칙·추가운행·변동운행 등 업무 규칙을 묻는 질문
+  ※ "특이사항", "추가운행", "변동", "규칙", "조건", "언제 가능" 같은 표현이 포함된 경우
 - COMPARE_OR_CONFIRM : 비교, 확인, 예/아니오, 의견, 데이터에 없는 정보를 묻는 질문
 - GENERAL_INFO : 연락처, 소속, 차량 정보, 거래처 납품 문의처 등 기사 기본 정보 질문
   ※ "거래처에 납품하려는데 누구에게 문의", "거래처 담당자" 같은 질문은 GENERAL_INFO
@@ -3038,18 +2931,26 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
                     intent_raw = rag_chain.llm._call(intent_prompt).strip().upper()
                     if "ROUTE_LOOKUP" in intent_raw:
                         intent = "ROUTE_LOOKUP"
+                    elif "OPERATION_RULE" in intent_raw:
+                        intent = "OPERATION_RULE"
                     elif "GENERAL_INFO" in intent_raw:
                         intent = "GENERAL_INFO"
                     else:
                         intent = "COMPARE_OR_CONFIRM"
                 except Exception:
                     # LLM 분류 실패 시 키워드 폴백
+                    OPERATION_RULE_KW = ["특이사항", "추가운행", "추가 운행", "변동운행", "변동 운행", "규칙", "조건"]
                     COMPARE_KW = [
                         "같은 노선", "동일한 노선", "항상 같", "차이가 있",
                         "다른가요", "다른지", "비교", "맞나요", "하나요",
                         "인가요", "할까요", "몇 명", "겹치는", "효율",
                     ]
-                    intent = "COMPARE_OR_CONFIRM" if any(k in query for k in COMPARE_KW) else "ROUTE_LOOKUP"
+                    if any(k in query for k in OPERATION_RULE_KW):
+                        intent = "OPERATION_RULE"
+                    elif any(k in query for k in COMPARE_KW):
+                        intent = "COMPARE_OR_CONFIRM"
+                    else:
+                        intent = "ROUTE_LOOKUP"
                     logger.warning(f"의도 분류 LLM 실패 → 키워드 폴백: {intent}")
 
                 logger.info(f"driver_route 의도 분류: {intent} | 질문: {query[:40]}")
@@ -3148,8 +3049,41 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
                         for name, d in _filtered.items():
                             lines_info.append(f"| {name} | {d['tel']} | {d['car']} | {d['area']} | {d['base']} |")
                         answer = "\n".join(lines_info)
+
+                elif intent == "OPERATION_RULE":
+                    # 운영규칙에서 기사 특이사항 Q&A를 직접 fetch → context 앞에 배치
+                    # (driver_route context_text는 노선 데이터만 있어서 Q&A가 없음)
+                    try:
+                        op_docs = rag_chain.fetch_whole_docs(["물류팀 운영 규칙"], limit=100)
+                        _op_kw = ['특이사항', '추가 운행', '추가운행', '변동운행',
+                                  '첫 운행', '마지막 노선', '미성폴리머', '신항', '김병일', '김영철', '이용구', '심효섭']
+                        # 기사 이름 추출 (질문에서)
+                        _driver_names = [n for n in ['김병일', '김영철', '이용구', '심효섭'] if n in query]
+                        # 관련 Q&A만 앞에, 나머지는 뒤에
+                        op_relevant = [
+                            d.page_content for d, _ in op_docs
+                            if any(k in d.page_content for k in _op_kw)
+                            or any(n in d.page_content for n in _driver_names)
+                        ]
+                        op_rest = [
+                            d.page_content for d, _ in op_docs
+                            if d.page_content not in op_relevant
+                        ]
+                        op_context = '\n\n---\n\n'.join(op_relevant + op_rest[:5])
+                        reordered = op_context + '\n\n---\n\n' + context_text if op_context else context_text
+                    except Exception:
+                        reordered = context_text
+                    _d_prompt = get_domain_prompt("operation_rule")
+                    formatted_prompt = _d_prompt.format(
+                        context=reordered,
+                        input=query,
+                        history_context=history_context if history_context else "없음",
+                        conversation_context=conversation_context if conversation_context else "없음"
+                    )
+                    answer = rag_chain.llm._call(formatted_prompt)
+
                 else:
-                    # COMPARE_OR_CONFIRM → LLM 답변
+                    # COMPARE_OR_CONFIRM → LLM 답변 (driver_route 프롬프트)
                     _d_prompt = get_domain_prompt("driver_route")
                     formatted_prompt = _d_prompt.format(
                         context=context_text,
@@ -3170,6 +3104,76 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
                     conversation_context=conversation_context if conversation_context else "없음"
                 )
                 answer = rag_chain.llm._call(formatted_prompt)
+
+            # ── sources 생성: answer 확정 이후 실행 ──
+            _all_src = sorted([{
+                'name': (
+                    doc.metadata.get('file_name')
+                    or os.path.basename(doc.metadata.get('source', ''))
+                    or doc.metadata.get('sheet_name', '검색 결과')
+                ),
+                'page_content': doc.page_content,
+                'sheet_name': doc.metadata.get('sheet_name', ''),
+                'internal_score': float(score),
+                'page': doc.metadata.get('page', 'N/A'),
+                '_meta': doc.metadata,
+            } for doc, score in filtered_docs],
+                key=lambda x: x['internal_score'], reverse=True
+            )
+
+            def _rerank_by_answer(sl, ans, top_n=5):
+                """
+                답변 텍스트와 실제로 겹치는 문서를 sources 앞에 배치.
+                겹침 토큰이 min_overlap 미만인 문서는 관련 없다고 판단해 제외.
+                """
+                if not ans:
+                    return sl[:top_n]
+
+                # 불용어 — 너무 흔해서 겹침 신호로 부적합한 단어
+                _sw = {
+                    '있습니다','합니다','됩니다','해야','하면','경우','그리고',
+                    '또는','이상','이하','위해','때문에','통해','따라','관련',
+                    '기준','방법','내용','정보','확인','처리','진행','가능',
+                    '불가','필요','요청','안내','담당','문의','연락','없음',
+                    '없습니다','입니다','합니다','됩니다','드립니다','주세요',
+                    '경우에는','경우에','있으며','있어서','있어야','있을','있는',
+                }
+                _at = set(
+                    t for t in ans.replace(chr(10), ' ').split()
+                    if len(t) >= 2 and t not in _sw
+                )
+
+                if not _at:
+                    return sl[:top_n]
+
+                def _ov(s):
+                    _ct = set(s['page_content'].replace(chr(10), ' ').split())
+                    return len(_at & _ct)
+
+                # 겹침 수 계산 후 최솟값(2개 이상) 이상인 문서만 "관련 있음"으로 분류
+                MIN_OVERLAP = 2
+                _m = sorted(
+                    [s for s in sl if _ov(s) >= MIN_OVERLAP],
+                    key=_ov, reverse=True
+                )
+                # 겹침 미달 문서는 아예 제외 (탭에 안 보이도록)
+                # fallback: 관련 문서가 없으면 score 상위 3개만
+                return _m[:top_n] if _m else sl[:3]
+
+            _sd = rag_chain._detect_domain(query)
+            if _sd == 'personnel':
+                _ns = [s for s in _all_src
+                       if s['_meta'].get('type') != 'summary'
+                       and s['_meta'].get('domain') == 'personnel'
+                       and s['_meta'].get('name', '') in answer]
+                _base = _ns if _ns else [s for s in _all_src if s['_meta'].get('type') != 'summary']
+                sources = _rerank_by_answer(_base, answer, top_n=5)
+            elif _sd in ('operation_rule', 'driver_route', 'route'):
+                sources = _rerank_by_answer(_all_src, answer, top_n=5)
+            else:
+                sources = _rerank_by_answer(_all_src, answer, top_n=3)
+            for s in sources:
+                s.pop('_meta', None)
 
             if "|" in answer and "---" in answer:
                 has_table = True

@@ -277,7 +277,7 @@ def show_bad_feedback_popup(msg_idx: int, query: str, answer: str):
             st.rerun()
 @st.dialog("📄 참고 문서 미리보기")
 def show_source_popup(sources: list, query: str):
-    """참고 문서 팝업 - 키워드 하이라이트 포함"""
+    """참고 문서 팝업 - 키워드 주변 맥락 발췌 + 하이라이트"""
     if not sources:
         st.info("참고한 문서 정보가 없습니다.")
         return
@@ -285,8 +285,30 @@ def show_source_popup(sources: list, query: str):
     # 키워드 추출 (2글자 이상)
     keywords = [k for k in query.split() if len(k) >= 2]
 
-    # 탭으로 문서 구분 (최대 10개)
-    display_sources = sources[:10]
+    def _extract_snippet(content: str, kws: list, window: int = 200) -> str:
+        """
+        키워드가 처음 등장하는 위치 주변 window자를 발췌.
+        키워드가 없으면 앞 300자만 반환.
+        """
+        if not content:
+            return "내용을 불러올 수 없습니다."
+        best_pos = len(content)
+        for kw in kws:
+            idx = content.lower().find(kw.lower())
+            if idx != -1 and idx < best_pos:
+                best_pos = idx
+        if best_pos == len(content):
+            # 키워드 미발견 → 앞 300자
+            snippet = content[:300]
+            suffix = "..." if len(content) > 300 else ""
+        else:
+            start = max(0, best_pos - 80)
+            end   = min(len(content), best_pos + window)
+            snippet = ("..." if start > 0 else "") + content[start:end] + ("..." if end < len(content) else "")
+        return snippet
+
+    # 탭으로 문서 구분 (최대 3개)
+    display_sources = sources[:3]
     tab_labels = [f"📄 {s['name'][:15]}.." if len(s['name']) > 15 else f"📄 {s['name']}" for s in display_sources]
     tabs = st.tabs(tab_labels)
 
@@ -294,8 +316,11 @@ def show_source_popup(sources: list, query: str):
         with tab:
             content = source.get("page_content", source.get("content", "내용을 불러올 수 없습니다."))
 
+            # 키워드 주변 발췌
+            snippet = _extract_snippet(content, keywords)
+
             # 키워드 하이라이트 적용
-            highlighted = content
+            highlighted = snippet
             for kw in keywords:
                 highlighted = re.sub(
                     f"({re.escape(kw)})",
@@ -309,7 +334,7 @@ def show_source_popup(sources: list, query: str):
             st.markdown(
                 f"""
                 <div style="
-                    height: 420px; overflow-y: auto;
+                    max-height: 260px; overflow-y: auto;
                     border: 1px solid #e2e8f0; border-radius: 10px;
                     padding: 16px 20px; background: #f8fafc;
                     color: #334155; line-height: 1.9; font-size: 14px;
