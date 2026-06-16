@@ -285,13 +285,14 @@ def show_source_popup(sources: list, query: str):
     # 키워드 추출 (2글자 이상)
     keywords = [k for k in query.split() if len(k) >= 2]
 
-    # 탭으로 문서 구분 (최대 3개)
-    tab_labels = [f"📄 {s['name'][:15]}.." if len(s['name']) > 15 else f"📄 {s['name']}" for s in sources]
+    # 탭으로 문서 구분 (최대 10개)
+    display_sources = sources[:10]
+    tab_labels = [f"📄 {s['name'][:15]}.." if len(s['name']) > 15 else f"📄 {s['name']}" for s in display_sources]
     tabs = st.tabs(tab_labels)
 
-    for tab, source in zip(tabs, sources):
+    for tab, source in zip(tabs, display_sources):
         with tab:
-            content = source.get("content", "내용을 불러올 수 없습니다.")
+            content = source.get("page_content", source.get("content", "내용을 불러올 수 없습니다."))
 
             # 키워드 하이라이트 적용
             highlighted = content
