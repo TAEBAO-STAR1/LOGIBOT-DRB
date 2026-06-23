@@ -386,18 +386,22 @@ _DOMAIN_RULES = {
 1. 인원 수 질문("몇 명", "총 몇 명", "인원은"):
    → 데이터에서 직접 세어 "물류팀 총 ○명입니다" 형식으로 답변
    → 리스트를 그대로 나열하지 말고 숫자로 직접 답변
-   → 세부 구성도 요청 시: "사무직 ○명, 현장직 ○명, 지입기사 ○명"
-2. 전체 현황 요청("현황", "명단", "알려줘"): 표 형식 | 성명 | 직책 | 담당공정 | 내선 |
+   → 세부 구성 요청 시: "사무직 ○명, 현장직 ○명" (데이터에 없는 항목은 절대 임의로 추가 금지)
+   → [참고 데이터]에 지입기사 인원 정보가 없으면 지입기사 항목 자체를 답변에 포함하지 말 것
+2. 전체 현황 요청("현황", "명단", "구성", "알려줘"): 표 형식 | 성명 | 직책 | 담당공정 | 내선 |
    전화번호 0이면 "직통번호 없음 (내선 문의)"
+   → [참고 데이터]에 있는 인원만 표에 포함 (없는 직군은 행 자체를 생략)
 3. 직책자 질문: 팀장·주임·기정만 출력 (사원·팀원·지입기사 제외)
    ※ 단, 지게차/외주 기사 현황 질문은 예외 → 아래 규칙6 적용
 4. 클레임/문의처: 해당 공정 주임 1명 + 팀원 1명만, 그 외 절대 포함 금지
    형식: "○○ 관련 문의는 아래 담당자에게 연락해 주세요.\n- 홍길동 주임 (내선: 1234)"
 5. 지입기사 질문: 이름·연락처·차량 종류 제시
-6. 지게차·외주 기사 현황 질문("지게차 기사", "지게차 기사님", "외주 기사"):
-   → [참고 데이터]의 운영규칙에서 지게차 관련 Q&A를 찾아 그대로 답변
+6. 지게차·외주 기사 현황 질문("지게차 기사", "지게차 현황", "지게차가 누구", "지게차 담당", "외주지게차", "지안물류"):
+   → [참고 데이터]의 운영규칙에서 "사내 지게차(외주 지게차, 지안물류) 기사님 현황 및 정보" Q&A를 찾아 그대로 답변
    → "지게차 기사님 총 3명 (4.5톤 3대, 10톤 1대)" 형식으로 제시
-   → 데이터에 이름/연락처가 없으면 "담당자(신태환 팀원, 내선 9067)에게 문의" 안내""",
+   → 추가 문의는 "담당자(신태환 팀원, 내선 9067)에게 문의" 안내
+   → 데이터에 이름/연락처가 별도로 없으면 위 형식으로만 답변
+7. 공통 원칙: [참고 데이터]에 없는 정보는 절대 추가하거나 추측하지 말 것""",
 
     "vehicle": """
 [차량 제원 전용 규칙]
@@ -1015,6 +1019,21 @@ class RAGChainWrapper:
                                          "지입기사", "지입 기사", "납품경로"]):
             return "driver_route"
 
+        # 2-1-c. 지게차/외주지게차 현황·정보 → personnel
+        _forklift_info_kw = [
+            "지게차 기사", "외주지게차", "외주 지게차", "지안물류",
+            "지게차 현황", "지게차 정보", "지게차 몇", "지게차 몇 명",
+            "지게차 몇대", "지게차 몇 대", "지게차는 몇", "지게차가 몇",
+            "지게차 있어", "지게차 없어", "지게차에 대한", "지게차 업체",
+            "지게차 대수", "지게차 총",
+            # 누구/담당/이름 패턴
+            "지게차가 누구", "지게차는 누구", "지게차 누구",
+            "지게차 담당", "지게차 이름", "지게차 연락",
+            "사내 지게차",
+        ]
+        if any(k in combined for k in _forklift_info_kw):
+            return "personnel"
+
         # 2-2. 수출 포장 — B01/B02 같은 사내 전용 코드는 LLM이 모름
         if any(k in combined for k in ["B01", "B02", "N18", "N19", "CBM", "cbm",
                                          "수출 파렛트", "컨테이너", "수출 포장량"]):
@@ -1028,8 +1047,11 @@ class RAGChainWrapper:
                 return "pallet_box"
 
         # 2-4. 차량 제원 명시 질문
-        if any(k in combined for k in ["적재함 길이", "적재함 폭", "차량 제원", "차량제원",
-                                         "톤수별 차량", "차량 규격"]):
+        if any(k in combined for k in ["적재함 길이", "적재함 폭", "적재함 제원", "적재함제원",
+                                         "차량 제원", "차량제원", "차량별 제원", "차량별 적재",
+                                         "톤수별 차량", "차량 규격", "차량별 규격",
+                                         "몇톤 차량 크기", "차량 크기", "차량 사이즈",
+                                         "적재함 크기", "적재함 길이", "로브이", "트레일러 제원"]):
             return "vehicle"
 
         # ══════════════════════════════════════════
@@ -1051,8 +1073,14 @@ domestic       : 국내 운송수단 선택·비교 (화물vs택배vs직송, 운
 general        : 위 3가지 외
 
 예시) "이정희 주임 연락처" → personnel
+예시) "지게차 기사님 현황" → personnel
+예시) "외주 지게차 정보 알려줘" → personnel
+예시) "사내 지게차 몇 대야" → personnel
 예시) "지게차 어떻게 신청해" → operation_rule
 예시) "3PLT 배차 요청 몇 톤 차량" → operation_rule
+예시) "차량별 적재함 제원 알려줘" → vehicle
+예시) "각 차량 크기가 어떻게 돼?" → vehicle
+예시) "1톤 차량 적재함 길이가 얼마야?" → vehicle
 예시) "인천까지 배차 언제 신청" → operation_rule
 예시) "택배vs직송 어떤게 나을까" → domestic
 예시) "샘플을 보내려고 하는데 어떻게 해야해" → operation_rule
@@ -1446,6 +1474,30 @@ general        : 위 3가지 외
                             added += 1
                     logger.info(f"export/컨테이너 질문 → 운영규칙+수출수식 보완: +{added}개")
 
+            # ── conveyor/crawler 업무절차·정의 질문 → 운영규칙 충분히 보완 ──
+            if domain in ("conveyor", "crawler"):
+                _op_trigger_kw = [
+                    "분단", "가능", "신청", "포장", "방법", "절차", "어떻게",
+                    "담당이라는", "담당이란", "담당이 뭐", "무엇이죠", "뭐야", "뭔가요",
+                    "무슨 일", "어떤 업무", "어떤 일", "역할", "하는 일",
+                ]
+                if any(k in query for k in _op_trigger_kw):
+                    conv_op_docs = self.fetch_whole_docs(["물류팀 운영 규칙"], limit=100)
+                    if conv_op_docs:
+                        existing = {doc.page_content[:50] for doc, _ in filtered_results}
+                        _conv_kw = ["컨베어", "크롤러", "러버트랙", "원자재", "청도", "담당", "분단"]
+                        conv_first = [(d, s) for d, s in conv_op_docs
+                                      if any(k in d.page_content for k in _conv_kw)]
+                        conv_rest  = [(d, s) for d, s in conv_op_docs
+                                      if (d, s) not in conv_first]
+                        added = 0
+                        for doc, score in conv_first + conv_rest[:5]:
+                            if doc.page_content[:50] not in existing:
+                                filtered_results.insert(0, (doc, score))
+                                existing.add(doc.page_content[:50])
+                                added += 1
+                        logger.info(f"conveyor/crawler 업무절차 질문 → 운영규칙 보완: +{added}개")
+
             # pallet_box 도메인 → 파렛트/박스 데이터 전체 강제 보완
             if domain == "pallet_box":
                 plt_docs = self.fetch_whole_docs(["파렛트, 박스 데이터"], limit=20)
@@ -1481,15 +1533,36 @@ general        : 위 3가지 외
             # Fix: personnel은 23개 문서 → limit=30으로 전체 보장
             if domain == "personnel":
                 # 운영규칙도 함께 보완 (지게차 요청 등이 personnel로 분류될 때 대비)
-                per_docs = self.fetch_whole_docs(["물류팀 현황 데이터", "물류팀 운영 규칙"], limit=30)
+                # limit=100: 지게차 현황 Q&A가 39번째 행 → limit=30이면 잘림
+                per_docs = self.fetch_whole_docs(["물류팀 현황 데이터", "물류팀 운영 규칙"], limit=100)
                 if per_docs:
                     existing = {doc.page_content[:50] for doc, _ in filtered_results}
-                    added = 0
-                    for doc, score in per_docs:
-                        if doc.page_content[:50] not in existing:
-                            filtered_results.append((doc, score))
-                            existing.add(doc.page_content[:50])
-                            added += 1
+
+                    # 지게차 관련 Q&A 우선 배치 (질문에 지게차 키워드 있을 때)
+                    _forklift_q_kw = ["지게차", "외주지게차", "지안물류"]
+                    _is_forklift_q = any(k in query for k in _forklift_q_kw)
+
+                    if _is_forklift_q:
+                        # 지게차 Q&A → filtered_results 맨 앞에 insert (context 앞에 오도록)
+                        forklift_docs = [(d, s) for d, s in per_docs if "지게차" in d.page_content]
+                        other_docs    = [(d, s) for d, s in per_docs if (d, s) not in forklift_docs]
+                        ordered_docs  = forklift_docs + other_docs
+                        insert_pos = 0
+                        for doc, score in forklift_docs:
+                            if doc.page_content[:50] not in existing:
+                                filtered_results.insert(insert_pos, (doc, score))
+                                existing.add(doc.page_content[:50])
+                                insert_pos += 1
+                        for doc, score in other_docs:
+                            if doc.page_content[:50] not in existing:
+                                filtered_results.append((doc, score))
+                                existing.add(doc.page_content[:50])
+                    else:
+                        for doc, score in per_docs:
+                            if doc.page_content[:50] not in existing:
+                                filtered_results.append((doc, score))
+                                existing.add(doc.page_content[:50])
+
                     # 벡터 결과에서 personnel 이외 도메인 문서 제거 → 데이터 혼입 방지
                     # ★ 운영규칙도 허용: 지게차 기사 현황 등이 운영규칙 시트에 존재
                     filtered_results = [
@@ -1499,7 +1572,7 @@ general        : 위 3가지 외
                         or doc.metadata.get("source") == "물류팀 운영 규칙"
                         or doc.metadata.get("domain") == "operation_rule"
                     ]
-                    logger.info(f"personnel 강제 보완: +{added}개, 타도메인 문서 제거 후 {len(filtered_results)}개")
+                    logger.info(f"personnel 강제 보완: 지게차우선={_is_forklift_q}, 타도메인 제거 후 {len(filtered_results)}개")
 
             # 지입기사 납품 동선: 전체 20개 문서가 필요 (A+B+공통)
             if domain == "driver_route":
@@ -2905,6 +2978,15 @@ def process_query(query: str, rag_chain: RAGChainWrapper, learning_system: Learn
                 _ctx_limit = 4000
             if len(context_text) > _ctx_limit:
                 context_text = context_text[:_ctx_limit] + "\n..."
+
+            # 지게차 질문 시 지게차 Q&A가 context 앞에 오는지 최종 보장
+            _fklift_kw = ["지게차", "외주지게차", "지안물류"]
+            if any(k in query for k in _fklift_kw):
+                _fklift_chunks = [doc.page_content for doc, _ in filtered_docs if "지게차" in doc.page_content]
+                _other_chunks  = [doc.page_content for doc, _ in filtered_docs if "지게차" not in doc.page_content]
+                if _fklift_chunks:
+                    reordered_text = "\n\n---\n\n".join(_fklift_chunks + _other_chunks)
+                    context_text = reordered_text[:_ctx_limit] + ("\n..." if len(reordered_text) > _ctx_limit else "")
 
             if is_table_request:
                 has_table = True

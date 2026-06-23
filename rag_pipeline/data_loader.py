@@ -17,8 +17,8 @@ data_loader.py  ─  Logibot V5 Qdrant 적재 모듈
 """
 
 import os, uuid, logging, re
-from datetime import date, datetime, timedelta
-from typing import List, Dict, Any
+from datetime import date, timedelta
+from typing import List, Dict
 
 import pandas as pd
 from openpyxl import load_workbook
