@@ -1622,8 +1622,8 @@ with st.sidebar:
         if df is None:
             return {}, [], []
 
-        # 헤더 행(index=2)에서 자재그룹 컬럼 위치 탐지
-        header_row = df.iloc[2].tolist()
+        # 헤더 행(index=0)에서 자재그룹 컬럼 위치 탐지
+        header_row = df.iloc[0].tolist()
         group_cols = {}
         for ci, cell in enumerate(header_row):
             m = _re.search(r'\b(B01|B02|N18|N19)\b', str(cell))
@@ -1643,7 +1643,7 @@ with st.sidebar:
         ]
 
         packing_table = {}
-        for row_idx in range(3, len(df)):
+        for row_idx in range(1, len(df)):   # 1행부터 데이터 시작 (0행=헤더)
             desc = str(df.iloc[row_idx, 1])
             if not desc.strip():
                 continue
@@ -1912,15 +1912,29 @@ with st.sidebar:
                 unit_w = PACKING_TABLE.get(selected_packing, {}).get(grp)
                 if not unit_w:
                     st.warning(f"⚠️ {grp} × {selected_packing} 조합의 중량 데이터가 없습니다.")
-                    unit_w = 1
-                calc_boxes   = _math.ceil(total_target_weight / unit_w)
-                calc_pallets = _math.ceil(calc_boxes / _boxes_pp)
+                    st.info("💡 해당 조합은 데이터가 없어 계산할 수 없습니다. 포장재 또는 자재그룹을 변경하거나 물류팀에 문의해 주세요.")
+                    calc_boxes   = 0
+                    calc_pallets = 0
+                else:
+                    calc_boxes   = _math.ceil(total_target_weight / unit_w)
+                    calc_pallets = _math.ceil(calc_boxes / _boxes_pp)
 
-                _c1, _c2 = st.columns(2)
-                with _c1:
-                    st.metric("필요 박스", f"{calc_boxes} PKG")
-                with _c2:
-                    st.metric("필요 PLT", f"{calc_pallets} PLT")
+                if calc_boxes > 0:
+                    st.markdown(f"""
+<div style="display:flex;gap:8px;margin:6px 0;">
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:10px;
+              padding:12px 14px;border:1.5px solid rgba(128,128,128,0.15);text-align:center;">
+    <div style="font-size:11px;opacity:0.6;color:var(--text-color);margin-bottom:4px;">필요 박스</div>
+    <div style="font-size:22px;font-weight:800;color:var(--text-color);line-height:1.2;">{int(calc_boxes)}</div>
+    <div style="font-size:12px;opacity:0.6;color:var(--text-color);">PKG</div>
+  </div>
+  <div style="flex:1;background:var(--secondary-background-color);border-radius:10px;
+              padding:12px 14px;border:1.5px solid rgba(59,130,246,0.25);text-align:center;">
+    <div style="font-size:11px;opacity:0.6;color:var(--text-color);margin-bottom:4px;">필요 PLT</div>
+    <div style="font-size:22px;font-weight:800;color:var(--text-color);line-height:1.2;">{int(calc_pallets)}</div>
+    <div style="font-size:12px;opacity:0.6;color:var(--text-color);">PLT</div>
+  </div>
+</div>""", unsafe_allow_html=True)
                 st.caption(
                     f"ℹ️ {grp} × {selected_packing} = {unit_w}kg/박스 / PLT당 {_boxes_pp}박스"
                 )
@@ -1955,124 +1969,83 @@ with st.sidebar:
 </div>
 """, unsafe_allow_html=True)
 
-            # ── 배차 및 컨테이너 분석 ─────────────────────────────────────
-            best_truck = get_db_transport_advice(calc_pallets)
+            # ── 배차 및 컨테이너 분석 (데이터 있을 때만) ─────────────────────
+            if calc_pallets > 0:
+                best_truck = get_db_transport_advice(calc_pallets)
 
-            with st.expander("🚚 배차 및 컨테이너 분석", expanded=True):
-                if best_truck:
-                    st.success(f"**추천 차량:** {best_truck['name']}")
-                    st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
-                    st.write(f"📦 **최대 적재 가능:** {best_truck['max_plt']} PLT")
+                with st.expander("🚚 배차 및 컨테이너 분석", expanded=True):
+                    if best_truck:
+                        st.success(f"**추천 차량:** {best_truck['name']}")
+                        st.write(f"📏 **적재함 제원:** {best_truck['spec']}")
+                        st.write(f"📦 **최대 적재 가능:** {best_truck['max_plt']} PLT")
 
-                    # 컨테이너 기준: 20ft(10 PLT), 40ft(20 PLT)
-                    if calc_pallets <= 10:
-                        cntr_type, max_cntr_plt = "20ft", 10
-                    else:
-                        cntr_type, max_cntr_plt = "40ft", 20
+                        # 컨테이너 기준: 20ft(10 PLT), 40ft(20 PLT)
+                        if calc_pallets <= 10:
+                            cntr_type, max_cntr_plt = "20ft", 10
+                        else:
+                            cntr_type, max_cntr_plt = "40ft", 20
 
-                    cntr_count = int(
-                        (calc_pallets // max_cntr_plt) +
-                        (1 if calc_pallets % max_cntr_plt > 0 else 0)
-                    )
-                    st.info(f"🚢 **해외 운송: {cntr_type} 컨테이너 {cntr_count}대 예상**")
-
-                    # 남은 공간
-                    used_last = calc_pallets % max_cntr_plt
-                    if used_last == 0 and calc_pallets > 0:
-                        used_last = max_cntr_plt
-                    rem_plt = max_cntr_plt - used_last
-
-                    if rem_plt > 0:
-                        st.markdown(f"**💡 풀 컨테이너(FCL)를 위한 추가 가능량** (남은 공간: {rem_plt:.2f} PLT)")
-                        add_cols = st.columns(2)
-                        for idx, g_code in enumerate(["B01", "B02", "N18", "N19"]):
-                            with add_cols[idx % 2]:
-                                if g_code in GROUP_PALLET_LIMIT:
-                                    add_boxes = int(rem_plt * GROUP_PALLET_LIMIT[g_code])
-                                    st.write(f"**{g_code}** : {add_boxes}박스")
-                                else:
-                                    st.write(f"**{g_code}** : 정보 없음")
-                    else:
-                        st.success("✅ 현재 풀 컨테이너 상태입니다.")
-                else:
-                    st.warning("⚠️ 대량 물량으로 인한 별도 배차 협의가 필요합니다.")
-
-            # ── 챗봇 연동 버튼 ────────────────────────────────────────────
-            _3d_spec   = _get_packing_spec(selected_packing)
-            _cntr_type = "20ft" if int(calc_pallets) <= 10 else "40ft"
-            _max_cap   = 10 if _cntr_type == "20ft" else 20
-            _box_type  = selected_packing.replace("제품-","").replace("슬리브-","")
-            _3d_plt_h  = _3d_spec["pkg_h"] if _3d_spec["has_pkg"] else _3d_spec["plt_h"]
-            _3d_layers = _3d_spec["layers"]
-            _grp       = selected_groups[0] if selected_groups else "B01"
-
-            # 컨테이너 대수별 PLT 배분 계산
-            _total_plt_int = int(calc_pallets)
-            _cntr_list = []   # [(컨테이너번호, 적재PLT)]
-            _remaining = _total_plt_int
-            _cntr_idx  = 1
-            while _remaining > 0:
-                _this_plt = min(_remaining, _max_cap)
-                _cntr_list.append((_cntr_idx, _this_plt))
-                _remaining -= _this_plt
-                _cntr_idx  += 1
-
-            # 3D 버튼: 컨테이너 1대면 기존 방식, 2대 이상이면 각각 버튼
-            if len(_cntr_list) == 1:
-                _btn3d_cntr, _btnq_cntr = st.columns([1, 1])
-                with _btn3d_cntr:
-                    if st.button("🧊 3D 입체 보기", use_container_width=True, key="cntr_3d_btn"):
-                        _used_plt = _cntr_list[0][1]
-                        show_3d_view_popup(
-                            trucks=[{
-                                "name": f"{_cntr_type} 컨테이너",
-                                "spec": f"컨테이너 {_cntr_type}",
-                                "assigned_plt"  : _used_plt,
-                                "max_plt_cap"   : _max_cap,
-                                "boxes_per_plt" : _3d_spec["boxes_per_plt"],
-                                "box_layers"    : _3d_layers,
-                                "box_type"      : _box_type,
-                                "container_type": _cntr_type,
-                                "plt_h_override": _3d_plt_h,
-                                "has_pkg"       : _3d_spec["has_pkg"],
-                                "is_lowbed"     : False,
-                            }],
-                            resolved_items=[{
-                                "name": _grp, "code": _grp,
-                                "plt_w": _3d_spec["plt_w"], "plt_l": _3d_spec["plt_l"],
-                                "pallets": _used_plt,
-                            }],
-                            mode="container"
+                        cntr_count = int(
+                            (calc_pallets // max_cntr_plt) +
+                            (1 if calc_pallets % max_cntr_plt > 0 else 0)
                         )
-                with _btnq_cntr:
-                    if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="cntr_query_btn"):
-                        grp_summary = ", ".join(f"{g}({group_weights.get(g,0):,.0f}kg)" for g in selected_groups)
-                        sim_summary = (
-                            f"포장재: {selected_packing}\n"
-                            f"자재그룹: {grp_summary}\n"
-                            f"목표 중량: {total_target_weight:,.0f}kg\n"
-                            f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT"
-                        )
-                        record_sim_inquiry("수출포장량", team=st.session_state.get("selected_team", ""))
-                        show_simulator_inquiry_popup("수출 포장량 시뮬레이터", sim_summary)
-            else:
-                # 컨테이너 2대 이상: 각 컨테이너별 3D 버튼 행
-                st.markdown(
-                    f'<div style="font-size:12px;font-weight:600;color:var(--text-color);'
-                    f'opacity:0.7;margin:6px 0 4px;">🚢 컨테이너 {len(_cntr_list)}대 — 각각 3D로 확인하세요</div>',
-                    unsafe_allow_html=True
-                )
-                _3d_cols = st.columns(len(_cntr_list))
-                for _ci, (_cno, _cplt) in enumerate(_cntr_list):
-                    with _3d_cols[_ci]:
-                        _is_full = (_cplt == _max_cap)
-                        _label = f"🧊 {_cno}번 컨테이너\n({'풀' if _is_full else f'{_cplt}/{_max_cap} PLT'})"
-                        if st.button(_label, use_container_width=True, key=f"cntr_3d_btn_{_cno}"):
+                        st.info(f"🚢 **해외 운송: {cntr_type} 컨테이너 {cntr_count}대 예상**")
+
+                        # 남은 공간
+                        used_last = calc_pallets % max_cntr_plt
+                        if used_last == 0 and calc_pallets > 0:
+                            used_last = max_cntr_plt
+                        rem_plt = max_cntr_plt - used_last
+
+                        if rem_plt > 0:
+                            st.markdown(f"**💡 풀 컨테이너(FCL)를 위한 추가 가능량** (남은 공간: {rem_plt:.2f} PLT)")
+                            add_cols = st.columns(2)
+                            for idx, g_code in enumerate(["B01", "B02", "N18", "N19"]):
+                                with add_cols[idx % 2]:
+                                    if g_code in GROUP_PALLET_LIMIT:
+                                        add_boxes = int(rem_plt * GROUP_PALLET_LIMIT[g_code])
+                                        st.write(f"**{g_code}** : {add_boxes}박스")
+                                    else:
+                                        st.write(f"**{g_code}** : 정보 없음")
+                        else:
+                            st.success("✅ 현재 풀 컨테이너 상태입니다.")
+                    else:
+                        st.warning("⚠️ 대량 물량으로 인한 별도 배차 협의가 필요합니다.")
+
+                # ── 챗봇 연동 버튼 ────────────────────────────────────────────
+                _3d_spec   = _get_packing_spec(selected_packing)
+                _cntr_type = "20ft" if int(calc_pallets) <= 10 else "40ft"
+                _max_cap   = 10 if _cntr_type == "20ft" else 20
+                _box_type  = selected_packing.replace("제품-","").replace("슬리브-","")
+                _3d_plt_h  = _3d_spec["pkg_h"] if _3d_spec["has_pkg"] else _3d_spec["plt_h"]
+                _3d_layers = _3d_spec["layers"]
+                _grp       = selected_groups[0] if selected_groups else "B01"
+
+                # 컨테이너 대수별 PLT 배분 계산
+                _total_plt_int = int(calc_pallets)
+                _cntr_list = []   # [(컨테이너번호, 적재PLT)]
+                _remaining = _total_plt_int
+                _cntr_idx  = 1
+                while _remaining > 0:
+                    _this_plt = min(_remaining, _max_cap)
+                    _cntr_list.append((_cntr_idx, _this_plt))
+                    _remaining -= _this_plt
+                    _cntr_idx  += 1
+
+                # 3D 버튼: 컨테이너 1대면 기존 방식, 2대 이상이면 각각 버튼
+                # _cntr_list가 비어있으면(calc_pallets=0) 3D 버튼 블록 전체 스킵
+                if not _cntr_list:
+                    st.info("포장재·자재 조합의 중량 데이터를 확인해주세요. PLT 수 계산 결과가 0입니다.")
+                elif len(_cntr_list) == 1:
+                    _btn3d_cntr, _btnq_cntr = st.columns([1, 1])
+                    with _btn3d_cntr:
+                        if st.button("🧊 3D 입체 보기", use_container_width=True, key="cntr_3d_btn"):
+                            _used_plt = _cntr_list[0][1]
                             show_3d_view_popup(
                                 trucks=[{
-                                    "name"          : f"{_cntr_type} {_cno}번 컨테이너",
-                                    "spec"          : f"컨테이너 {_cntr_type}",
-                                    "assigned_plt"  : _cplt,
+                                    "name": f"{_cntr_type} 컨테이너",
+                                    "spec": f"컨테이너 {_cntr_type}",
+                                    "assigned_plt"  : _used_plt,
                                     "max_plt_cap"   : _max_cap,
                                     "boxes_per_plt" : _3d_spec["boxes_per_plt"],
                                     "box_layers"    : _3d_layers,
@@ -2085,22 +2058,69 @@ with st.sidebar:
                                 resolved_items=[{
                                     "name": _grp, "code": _grp,
                                     "plt_w": _3d_spec["plt_w"], "plt_l": _3d_spec["plt_l"],
-                                    "pallets": _cplt,
+                                    "pallets": _used_plt,
                                 }],
                                 mode="container"
                             )
-                # 문의 버튼은 별도 행
-                if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="cntr_query_btn"):
-                    grp_summary = ", ".join(f"{g}({group_weights.get(g,0):,.0f}kg)" for g in selected_groups)
-                    sim_summary = (
-                        f"포장재: {selected_packing}\n"
-                        f"자재그룹: {grp_summary}\n"
-                        f"목표 중량: {total_target_weight:,.0f}kg\n"
-                        f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT\n"
-                        f"컨테이너: {_cntr_type} {len(_cntr_list)}대"
+                    with _btnq_cntr:
+                        if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="cntr_query_btn"):
+                            grp_summary = ", ".join(f"{g}({group_weights.get(g,0):,.0f}kg)" for g in selected_groups)
+                            sim_summary = (
+                                f"포장재: {selected_packing}\n"
+                                f"자재그룹: {grp_summary}\n"
+                                f"목표 중량: {total_target_weight:,.0f}kg\n"
+                                f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT"
+                            )
+                            record_sim_inquiry("수출포장량", team=st.session_state.get("selected_team", ""))
+                            show_simulator_inquiry_popup("수출 포장량 시뮬레이터", sim_summary)
+                else:
+                    # 컨테이너 2대 이상: 각 컨테이너별 3D 버튼 행
+                    st.markdown(
+                        f'<div style="font-size:12px;font-weight:600;color:var(--text-color);'
+                        f'opacity:0.7;margin:6px 0 4px;">🚢 컨테이너 {len(_cntr_list)}대 — 각각 3D로 확인하세요</div>',
+                        unsafe_allow_html=True
                     )
-                    record_sim_inquiry("수출포장량", team=st.session_state.get("selected_team", ""))
-                    show_simulator_inquiry_popup("수출 포장량 시뮬레이터", sim_summary)
+                    _3d_cols = st.columns(len(_cntr_list))
+                    for _ci, (_cno, _cplt) in enumerate(_cntr_list):
+                        with _3d_cols[_ci]:
+                            _is_full = (_cplt == _max_cap)
+                            _status  = "풀" if _is_full else f"{_cplt}/{_max_cap}"
+                            _label   = f"🧊 {_cno}번"
+                            st.caption(f"**{_cno}번** ({_status} PLT)")
+                            if st.button(_label, use_container_width=True, key=f"cntr_3d_btn_{_cno}"):
+                                show_3d_view_popup(
+                                    trucks=[{
+                                        "name"          : f"{_cntr_type} {_cno}번 컨테이너",
+                                        "spec"          : f"컨테이너 {_cntr_type}",
+                                        "assigned_plt"  : _cplt,
+                                        "max_plt_cap"   : _max_cap,
+                                        "boxes_per_plt" : _3d_spec["boxes_per_plt"],
+                                        "box_layers"    : _3d_layers,
+                                        "box_type"      : _box_type,
+                                        "container_type": _cntr_type,
+                                        "plt_h_override": _3d_plt_h,
+                                        "has_pkg"       : _3d_spec["has_pkg"],
+                                        "is_lowbed"     : False,
+                                    }],
+                                    resolved_items=[{
+                                        "name": _grp, "code": _grp,
+                                        "plt_w": _3d_spec["plt_w"], "plt_l": _3d_spec["plt_l"],
+                                        "pallets": _cplt,
+                                    }],
+                                    mode="container"
+                                )
+                    # 문의 버튼은 별도 행
+                    if st.button("📋 시뮬레이터 문의하기", use_container_width=True, key="cntr_query_btn"):
+                        grp_summary = ", ".join(f"{g}({group_weights.get(g,0):,.0f}kg)" for g in selected_groups)
+                        sim_summary = (
+                            f"포장재: {selected_packing}\n"
+                            f"자재그룹: {grp_summary}\n"
+                            f"목표 중량: {total_target_weight:,.0f}kg\n"
+                            f"계산 결과: {int(calc_boxes)}박스 / {int(calc_pallets)}PLT\n"
+                            f"컨테이너: {_cntr_type} {len(_cntr_list)}대"
+                        )
+                        record_sim_inquiry("수출포장량", team=st.session_state.get("selected_team", ""))
+                        show_simulator_inquiry_popup("수출 포장량 시뮬레이터", sim_summary)
 
 
     elif current_team == "국내영업팀":
